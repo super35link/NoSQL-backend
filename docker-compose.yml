@@ -1,0 +1,64 @@
+services:
+  db:
+    image: postgres:latest
+    container_name: fastapi-auth-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: fastapi_auth
+    ports:
+      - "5432:5432"
+    volumes:
+      - fastapi-auth-db-data:/var/lib/postgresql/data
+
+  mongodb:
+    image: mongo:latest
+    container_name: fastapi-mongo-db
+    ports:
+      - "27017:27017"
+    volumes:
+      - fastapi-mongo-db-data:/data/db
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: fastapi-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - fastapi-qdrant-data:/qdrant/storage
+
+  web:
+    build: .
+    container_name: fastapi-auth-app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - mongodb
+      - qdrant
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/fastapi_auth
+      - MONGODB_URL=mongodb://mongodb:27017
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - SECRET_KEY=your-secret-key-here
+      - JWT_SECRET=your-jwt-secret-here
+      - MAIL_USERNAME=your-email-username
+      - MAIL_PASSWORD=your-email-password
+      - MAIL_FROM=your-email-address
+      - MAIL_PORT=5432
+      - MAIL_SERVER=localhost
+      - MAIL_STARTTLS=false
+      - MAIL_SSL_TLS=false
+
+volumes:
+  fastapi-auth-db-data:
+    name: fastapi-auth-db-data
+  fastapi-mongo-db-data:
+    name: fastapi-mongo-db-data
+  fastapi-qdrant-data:
+    name: fastapi-qdrant-data
