@@ -115,27 +115,67 @@ class Settings:
 
 ```
 app/
-├── api/
-│   ├── v1/
-│   │   ├── endpoints/
-│   │   └── router.py
-├── core/
-│   ├── config.py
-│   └── security.py
-├── db/
-│   ├── models.py
-│   ├── mongodb.py
-│   └── qdrant.py
-├── posts/
-│   ├── embedding_service.py
-│   ├── engagement_service.py
-│   ├── post_service.py
-│   ├── search_service.py
-│   ├── thread_service.py
-│   └── content_classification_service.py
-├── schemas/
-│   └── post.py
-└── main.py
+├── alembic.ini
+├── migrations/
+├── app/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── api/
+│   │   └── v1/
+│   │       ├── __init__.py
+│   │       └── endpoints/
+│   ├── auth/
+│   │   ├── __init__.py
+│   │   ├── dependencies.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   └── service.py
+│   ├── core/
+│   │   ├── __init__.py
+│   │   └── config.py
+│   ├── db/
+│   │   ├── __init__.py
+│   │   ├── base.py
+│   │   ├── models.py
+│   │   ├── mongodb.py
+│   │   └── qdrant.py
+│   ├── follow/
+│   │   ├── __init__.py
+│   │   ├── models.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   └── service.py
+│   ├── posts/
+│   │   ├── __init__.py
+│   │   ├── core_post_service.py
+│   │   ├── thread_service.py
+│   │   ├── user_content_service.py
+│   │   ├── content_classification_service.py
+│   │   ├── comprehensive_search_service.py
+│   │   ├── batched_search_service.py
+│   │   ├── embedding_service.py
+│   │   ├── engagement_service.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   └── service.py
+│   ├── profile/
+│   │   ├── __init__.py
+│   │   ├── models.py
+│   │   ├── router.py
+│   │   ├── schemas.py
+│   │   └── service.py
+│   └── settings/
+│       ├── __init__.py
+│       ├── models.py
+│       ├── router.py
+│       ├── schemas.py
+│       └── service.py
+├── tests/
+│   └── __init__.py
+├── .env.example
+├── .gitignore
+├── README.md
+└── requirements.txt
 ```
 
 ## 🚦 API Endpoints
