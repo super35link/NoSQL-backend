@@ -1,7 +1,6 @@
 from sentence_transformers import SentenceTransformer
 from app.db.qdrant import QdrantManager
 from typing import List, Dict, Union
-import numpy as np
 from datetime import datetime
 import logging
 

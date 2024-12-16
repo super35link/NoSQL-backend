@@ -7,7 +7,7 @@ import logging
 from fastapi import HTTPException, status
 
 from app.db.models import Thread, Post, User, ThreadStatus
-from .schemas import ThreadCreate, PostCreate, ThreadResponse, PostResponse
+from posts.schemas import ThreadCreate, PostCreate, ThreadResponse, PostResponse
 
 logger = logging.getLogger(__name__)
 

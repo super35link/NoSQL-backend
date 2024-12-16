@@ -1,6 +1,13 @@
 from datetime import datetime
 from typing import Dict, List, Optional
 from enum import Enum
+from app.auth.dependencies import get_user
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.posts.service import get_post
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 from app.db.mongodb import get_mongodb
 
@@ -11,11 +18,17 @@ class InteractionType(Enum):
     COMMENT = "comment"
 
 class PostEngagementService:
-    def __init__(self):
-        self.db = get_mongodb()
-        # Using collections from existing MongoDB setup
-        self.engagements = self.db.post_engagements
-        self.interaction_history = self.db.interaction_history
+    def __init__(self, db: AsyncSession):
+        self.mongodb = get_mongodb()
+        self.engagements = self.mongodb.post_engagements
+        self.interaction_history = self.mongodb.interaction_history
+        self.db = db  # PostgreSQL session
+
+    async def validate_post_and_user(self, post_id: int, user_id: int) -> bool:
+        """Validate that both post and user exist in PostgreSQL"""
+        post = await get_post(self.db, post_id)
+        user = await get_user(self.db, user_id)
+        return bool(post and user)
 
     async def toggle_like(self, post_id: int, user_id: int) -> bool:
         """Toggle like status for a post"""

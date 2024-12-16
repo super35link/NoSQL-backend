@@ -18,3 +18,7 @@ transformers>=4.47.0
 tqdm>=4.67.1
 torchaudio>=2.5.0             
 torchvision>=0.20.0                      
+redis
+tokenizers
+threadpoolctl
+

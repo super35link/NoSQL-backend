@@ -6,7 +6,7 @@ from datetime import datetime
 import logging
 
 from app.db.models import User, Post, Thread, post_mentions, post_hashtags, Hashtag
-from .schemas import PostResponse, ThreadResponse
+from posts.schemas import PostResponse, ThreadResponse
 
 logger = logging.getLogger(__name__)
 

@@ -1,7 +1,7 @@
 # tests/test_engagement.py
 import asyncio
 from datetime import datetime
-from app.posts.engagement_service import PostEngagementService, InteractionType
+from app.posts.services.engagement_service import PostEngagementService, InteractionType
 
 async def test_engagement_service():
     service = PostEngagementService()
