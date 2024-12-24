@@ -1,8 +1,8 @@
 import re
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, func
-from sqlalchemy.orm import joinedload
-from typing import Dict, Optional, List, Set
+from sqlalchemy import delete, select, func
+from sqlalchemy.orm import joinedload, contains_eager
+from typing import Dict, Literal, Optional, List, Set
 from datetime import datetime
 import logging
 from fastapi import HTTPException, status
@@ -10,7 +10,7 @@ from redis import Redis
 from pydantic import ValidationError
 import json
 
-from app.db.models import Post, User, post_mentions
+from app.db.models import Hashtag, Post, User, post_mentions, post_hashtags
 from app.db.redis import RedisManager
 from posts.schemas.post_schemas import PostCreate, PostUpdate, PostResponse
 
@@ -83,7 +83,7 @@ class EnhancedCorePostService:
     def __init__(self, cache: PostCache, validator: PostValidator):
         self.cache = cache
         self.validator = validator
-        self.redis_managerr = RedisManager()
+        self.redis_manager = RedisManager()
         
     async def create_post(
         self, 
@@ -96,6 +96,9 @@ class EnhancedCorePostService:
         user = await self._get_user(session, user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+        
+        # Validate content
+        await self.validator.validate_content(post_data.content)
 
         # Validate content and rate limit
         rate_limit_key = f"post_rate:{user_id}"
@@ -108,6 +111,15 @@ class EnhancedCorePostService:
             status_code=429,
             detail="Post rate limit exceeded"
         )
+            
+         # Validate content and rate limit
+        await self.validator.validate_content(post_data.content)
+        await self.validator.validate_rate_limit(user_id)
+
+        # Extract hashtags and mentions
+        hashtags = await self._extract_entities(session, post_data.content, "hashtag")
+        mentioned_user_ids = await self._extract_entities(session, post_data.content, "mention")
+
 
         # Create post instance
         post = Post(
@@ -120,6 +132,11 @@ class EnhancedCorePostService:
             session.add(post)
             await session.commit()
             await session.refresh(post)
+            
+             # Store hashtags and mentions
+            await self._batch_store_hashtags(session, post.id, hashtags)
+            await self._batch_store_mentions(session, post.id, mentioned_user_ids)
+            
             
             # Prepare response
             response = PostResponse(
@@ -143,6 +160,7 @@ class EnhancedCorePostService:
                 detail="Failed to create post"
             )
 
+
     async def get_post(
         self, 
         session: AsyncSession, 
@@ -155,22 +173,34 @@ class EnhancedCorePostService:
             return PostResponse(**cached_post)
             
         # If not in cache, query database
-        result = await session.execute(
-            select(Post)
-            .options(joinedload(Post.author))
+        stmt = (
+            select(Post, User.username)
+            .join(Post, User.id == Post.author_id)  # Join with User table
+            .options(contains_eager(Post.author))  # Load author data eagerly
             .where(Post.id == post_id)
         )
-        post = result.unique().scalar_one_or_none()
         
-        if not post:
-            return None
+        result = await session.execute(stmt)
+        post: Optional[Post] = result.unique().scalar_one_or_none()
+        
+        row = result.first()
+        if not row:
+                return None
+        
+        post, username = row
             
         response = PostResponse(
-            id=post.id,
+            # Fields from PostBase
             content=post.content,
+            reply_to_id=post.reply_to_id,
+            
+            # Fields from PostResponse
+            id=post.id,
             created_at=post.created_at,
-            author_username=post.author.username,
-            reply_to_id=post.reply_to_id
+            author_username=username,
+            like_count=post.like_count,  # Make sure these fields exist in Post model
+            view_count=post.view_count,
+            repost_count=post.repost_count
         )
         
         # Cache the post
@@ -190,7 +220,7 @@ class EnhancedCorePostService:
         if post_data.content:
             await self.validator.validate_content(post_data.content)
 
-        # Get existing post
+        # Get existing post and verify ownership
         post = await self.get_post(session, post_id)
         if not post:
             raise HTTPException(status_code=404, detail="Post not found")
@@ -202,21 +232,43 @@ class EnhancedCorePostService:
         db_post = result.scalar_one()
         if db_post.author_id != user_id:
             raise HTTPException(status_code=403, detail="Not authorized to update this post")
-        
-        # Update post
-        update_data = post_data.dict(exclude_unset=True)
+
         try:
-            await session.execute(
-                update(Post)
-                .where(Post.id == post_id)
-                .values(**update_data, updated_at=datetime.utcnow())
-            )
+            # Extract new hashtags and mentions if content is updated
+            if post_data.content:
+                # Clear existing hashtags and mentions
+                await session.execute(
+                    delete(post_hashtags).where(post_hashtags.c.post_id == post_id)
+                )
+                await session.execute(
+                    delete(post_mentions).where(post_mentions.c.post_id == post_id)
+                )
+                
+                # Extract and store new hashtags and mentions
+                hashtags = await self._extract_entities(session, post_data.content, "hashtag")
+                mentioned_user_ids = await self._extract_entities(session, post_data.content, "mention")
+                
+                await self._batch_store_hashtags(session, post_id, hashtags)
+                await self._batch_store_mentions(session, post_id, mentioned_user_ids)
+
+            # Update post content
+            db_post.content = post_data.content or db_post.content
+            db_post.updated_at = datetime.utcnow()
+            
             await session.commit()
+            await session.refresh(db_post)
             
             # Invalidate cache
             await self.cache.invalidate_post(post_id)
             
-            return await self.get_post(session, post_id)
+            # Return updated post
+            return PostResponse(
+                id=db_post.id,
+                content=db_post.content,
+                created_at=db_post.created_at,
+                author_username=(await self._get_user(session, user_id)).username,
+                reply_to_id=db_post.reply_to_id
+            )
 
         except Exception as e:
             await session.rollback()
@@ -401,19 +453,16 @@ class EnhancedCorePostService:
                     detail=f"Not authorized to delete posts: {unauthorized_ids}"
                 )
 
-            # Delete posts
-            deleted_ids = []
-            failed_ids = []
+            # Delete posts in a single operation
+                # Delete posts in a single operation
+            await session.execute(
+                delete(Post)
+                .where(Post.id.in_(post_ids))
+            )
             
-            for post in posts:
-                try:
-                    await session.delete(post)
-                    deleted_ids.append(post.id)
-                    # Invalidate cache for each post
-                    await self.cache.invalidate_post(post.id)
-                except Exception as e:
-                    logger.error(f"Failed to delete post {post.id}: {e}")
-                    failed_ids.append(post.id)
+            # Invalidate cache for each post
+            for post_id in post_ids:
+                await self.cache.invalidate_post(post_id)
             
             await session.commit()
             
@@ -421,8 +470,8 @@ class EnhancedCorePostService:
             await self.cache.invalidate_post(f"post_count:{user_id}")
             
             return {
-                "deleted": deleted_ids,
-                "failed": failed_ids
+                "deleted": post_ids,
+                "failed": []
             }
             
         except Exception as e:
@@ -432,28 +481,113 @@ class EnhancedCorePostService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to bulk delete posts"
             )
-    async def _extract_mentions(
+
+    async def _extract_entities(
+            self,
+            session: AsyncSession,
+            content: str, 
+            entity_type: Literal["hashtag", "mention"]
+        ) -> Set[str] | Set[int]:  # Return type can be either Set[str] for hashtags or Set[int] for mentions
+            """Extract and validate entities (hashtags, mentions) from content"""
+            patterns = {
+                "hashtag": r'#(\w+)',
+                "mention": r'@(\w+)'
+            }
+            
+            if entity_type not in patterns:
+                raise ValueError(f"Unsupported entity type: {entity_type}")
+            
+            pattern = patterns[entity_type]
+            matches: List[str] = re.findall(pattern, content)
+
+            if not matches:
+                return set()
+            
+            if entity_type == "hashtag":
+                return {
+                    tag for tag in matches 
+                    if len(tag) <= 50 and not any(c.isspace() for c in tag)
+                }
+            
+            # Handle user mentions
+            try:
+                result = await session.execute(
+                    select(User)
+                    .where(User.username.in_(matches))
+                )
+                valid_users = result.scalars().all()
+                
+                return {user.id for user in valid_users}
+            
+            except Exception as e:
+                logger.error(f"Error extracting mentions from content: {e}")
+                return set()
+
+    async def _batch_store_hashtags(
         self,
         session: AsyncSession,
-        content: str
-    ) -> Set[int]:
-        """Extract and validate user mentions from content"""
-        # Extract usernames from @ mentions
-        pattern = r'@(\w+)'
-        mentioned_usernames = set(re.findall(pattern, content))
-        
-        if not mentioned_usernames:
-            return set()
+        post_id: int,
+        hashtags: Set[str]
+    ) -> None:
+        """Store hashtags with batching"""
+        if not hashtags:
+            return
 
-        # Validate mentioned users exist
-        result = await session.execute(
-            select(User)
-            .where(User.username.in_(mentioned_usernames))
+        # Get or create hashtags in batch
+        existing_hashtags = await session.execute(
+            select(Hashtag).where(Hashtag.tag.in_(hashtags))
         )
-        valid_users = result.scalars().all()
+        existing_hashtags = {h.tag: h for h in existing_hashtags.scalars()}
         
-        # Return set of valid user IDs
-        return {user.id for user in valid_users}
+        # Create new hashtags
+        new_hashtags = []
+        for tag in hashtags:
+            if tag not in existing_hashtags:
+                new_hashtag = Hashtag(tag=tag)
+                session.add(new_hashtag)
+                new_hashtags.append(new_hashtag)
+        
+        if new_hashtags:
+            await session.flush()
+            
+        # Create associations
+        for tag in hashtags:
+            hashtag = existing_hashtags.get(tag) or new_hashtags.pop(0)
+            await session.execute(
+                post_hashtags.insert().values(
+                    post_id=post_id,
+                    hashtag_id=hashtag.id
+                )
+            )
+
+
+    async def _batch_store_mentions(
+            self,
+            session: AsyncSession,
+            post_id: int,
+            mentions: set[str]
+        ) -> None:
+            """Store mentions with batching"""
+            if not mentions:
+                return
+
+            # Get or fetch mentioned users in batch
+            existing_users = await session.execute(
+                select(User).where(User.username.in_(mentions))
+            )
+            existing_users = {u.username: u for u in existing_users.scalars()}
+            
+            # Create mention associations
+            for username in mentions:
+                if user := existing_users.get(username):
+                    await session.execute(
+                        post_mentions.insert().values(
+                            post_id=post_id,
+                            user_id=user.id
+                        )
+                    )
+
+            # Note: We silently skip mentions of non-existent users    
 
     async def _store_mentions(
         self,

@@ -1,18 +1,18 @@
 import asyncio
 import hashlib
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import ScalarResult, select
+from sqlalchemy import select
 from typing import List, Dict, Set, Optional
 from sqlalchemy.sql.selectable import Select
 from datetime import datetime, timedelta
-import re
 import logging
 from fastapi import HTTPException
 from transformers import pipeline
-from app.db.models import User, Hashtag, post_hashtags, post_mentions
+from app.db.models import User, Hashtag, post_hashtags
 from app.db.mongodb import get_mongodb
 from app.db.qdrant import QdrantManager
 from app.db.redis import RedisManager
+from app.posts.schemas.classification_schemas import ContentClassification, TopicResponse
 from .embedding_service import PostEmbeddingService
 
 logger = logging.getLogger(__name__)
@@ -41,40 +41,48 @@ class ContentClassificationService:
         session: AsyncSession, 
         post_id: int, 
         content: str,
-    ) -> Dict:
+        mentioned_user_ids: Set[int],
+        hashtags: Set[str]
+    ) -> ContentClassification:
         """Process new content with enhanced classification"""
         try:
             # Check cache first
             cache_key = f"content_classification:{post_id}"
             cached_result = await self.redis_manager.get_post(cache_key)
             if cached_result:
-                return cached_result
+                return ContentClassification(**cached_result)
 
-            # Parallel processing of different classifications
+            # Run classifications in parallel
             classifications = await self._parallel_classify(content)
-            
-            # Extract metadata
-            hashtags = self._extract_hashtags(content)
-            mentioned_user_ids: Set[int] = await self._extract_mentions(session, content)   
-                     
-            # Store in PostgreSQL with batching
-            await self._batch_store_hashtags(session, post_id, hashtags)
-            await self._batch_store_mentions(session, post_id, mentioned_user_ids)
             
             # Get usernames for response
             select_stmt: Select = select(User.username).where(User.id.in_(mentioned_user_ids))
             result = await session.execute(select_stmt)
-
-            mentioned_users: ScalarResult = result.scalars()
-
-            mentioned_usernames: list[str] = [
-            username for username in mentioned_users]
+            mentioned_users = result.scalars()
+            mentioned_usernames: List[str] = [username for username in mentioned_users]
 
             # Generate embedding and classify topics
             embedding = await self.embedding_service.generate_embedding(content)
-            topics = await self._classify_topics(content, embedding)
+            raw_topics = await self._classify_topics(content, embedding)
             
-            # Content moderation check
+            # Convert raw topics to TopicResponse objects
+            topics = [
+                TopicResponse(
+                    topic=t["topic"],
+                    confidence=t["confidence"],
+                    related_hashtags=t.get("related_hashtags", [])
+                ) for t in raw_topics
+            ]
+            
+            # Store topic classifications
+            await self.topic_collection.insert_one({
+                "post_id": post_id,
+                "topics": [t.dict() for t in topics],
+                "embedding": embedding,
+                "timestamp": datetime.utcnow()
+            })
+
+            # Check content moderation
             moderation_result = await self._moderate_content(content)
             if not moderation_result["is_safe"]:
                 raise HTTPException(
@@ -82,27 +90,78 @@ class ContentClassificationService:
                     detail="Content violates community guidelines"
                 )
             
-            # Update trending metrics asynchronously
-            await self._async_update_trending_metrics(hashtags, topics)
+            # Store moderation result
+            await self.moderation_collection.insert_one({
+                "post_id": post_id,
+                "result": moderation_result,
+                "timestamp": datetime.utcnow()
+            })
             
-            result = {
-                "hashtags": list(hashtags),
-                "mentions": mentioned_usernames,  # Return usernames instead of IDs
-                "topics": topics,
-                "sentiment": classifications["sentiment"],
-                "content_rating": moderation_result["rating"],
-                "language": classifications["language"],
-                "entity_analysis": classifications["entities"]
-            }
+            # Create ContentClassification response
+            classification = ContentClassification(
+                hashtags=list(hashtags),
+                topics=topics,
+                content_type="post",
+                sentiment=classifications["sentiment"],       # Add these from
+                language=classifications["language"],         # parallel_classify
+                entity_analysis=classifications["entities"],   # results
+                mentions=mentioned_usernames
+            )
             
             # Cache the result
-            await self.redis_manager.set_post(cache_key, result)
+            await self.redis_manager.set_post(cache_key, classification.dict())
             
-            return result
+            # Update trending metrics asynchronously
+            asyncio.create_task(self._async_update_trending_metrics(hashtags, topics))
+            
+            return classification
 
         except Exception as e:
             logger.error(f"Error processing content classification: {e}")
             raise
+        
+    async def _async_update_trending_metrics(
+        self,
+        hashtags: Set[str],
+        topics: List[Dict[str, float]]
+    ) -> None:
+        """Update trending metrics asynchronously"""
+        try:
+            timestamp = datetime.utcnow()
+            
+            # Prepare bulk operations for hashtags
+            hashtag_ops = [
+                {
+                    "type": "hashtag",
+                    "tag": tag,
+                    "timestamp": timestamp,
+                    "engagement_value": 1
+                }
+                for tag in hashtags
+            ]
+            
+            # Prepare bulk operations for topics
+            topic_ops = [
+                {
+                    "type": "topic",
+                    "topic": topic["topic"],
+                    "confidence": topic["confidence"],
+                    "timestamp": timestamp
+                }
+                for topic in topics
+            ]
+            
+            # Execute in parallel
+            await asyncio.gather(
+                self.trending_collection.insert_many(hashtag_ops),
+                self.trending_collection.insert_many(topic_ops)
+            )
+            
+        except Exception as e:
+            logger.error(f"Error updating trending metrics: {e}")
+            logger.error(f"Hashtag operations: {hashtag_ops}")
+            logger.error(f"Topic operations: {topic_ops}")
+            # Continue execution even if trending updates fail
 
     async def get_trending_hashtags(
         self,
@@ -286,84 +345,7 @@ class ContentClassificationService:
                     hashtag_id=hashtag.id
                 )
             )
-    async def _batch_store_mentions(
-        self,
-        session: AsyncSession,
-        post_id: int,
-        mentions: set[str]
-    ) -> None:
-        """Store mentions with batching"""
-        if not mentions:
-            return
 
-        # Get or fetch mentioned users in batch
-        existing_users = await session.execute(
-            select(User).where(User.username.in_(mentions))
-        )
-        existing_users = {u.username: u for u in existing_users.scalars()}
-        
-        # Create mention associations
-        for username in mentions:
-            if user := existing_users.get(username):
-                await session.execute(
-                    post_mentions.insert().values(
-                        post_id=post_id,
-                        user_id=user.id
-                    )
-                )
-
-        # Note: We silently skip mentions of non-existent users
-
-    def _extract_hashtags(self, content: str) -> Set[str]:
-        """Extract and validate hashtags"""
-        pattern = r'#(\w+)'
-        hashtags = set(re.findall(pattern, content))
-        
-        # Filter invalid hashtags
-        return {
-            tag for tag in hashtags 
-            if len(tag) <= 50 and not any(c.isspace() for c in tag)
-        }
-
-
-    async def _async_update_trending_metrics(
-        self,
-        hashtags: Set[str],
-        topics: List[str]
-    ):
-        """Update trending metrics asynchronously"""
-        try:
-            timestamp = datetime.utcnow()
-            
-            # Prepare bulk operations
-            hashtag_ops = [
-                {
-                    "type": "hashtag",
-                    "tag": tag,
-                    "timestamp": timestamp,
-                    "engagement_value": 1
-                }
-                for tag in hashtags
-            ]
-            
-            topic_ops = [
-                {
-                    "type": "topic",
-                    "topic": topic,
-                    "timestamp": timestamp
-                }
-                for topic in topics
-            ]
-            
-            # Execute in parallel
-            await asyncio.gather(
-                self.trending_collection.insert_many(hashtag_ops),
-                self.trending_collection.insert_many(topic_ops)
-            )
-            
-        except Exception as e:
-            logger.error(f"Error updating trending metrics: {e}")
-            # Continue execution even if trending updates fail
     async def _detect_language(self, content: str) -> Dict[str, str]:
         """Detect content language"""
         try:

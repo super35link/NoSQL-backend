@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, update, func
+from sqlalchemy import Tuple, select, delete, func
 from sqlalchemy.orm import joinedload
 from typing import Dict, List, Optional
 from datetime import datetime
@@ -7,11 +7,15 @@ import logging
 from fastapi import HTTPException, status
 
 from app.db.models import Thread, Post, User, ThreadStatus
-from posts.schemas import ThreadCreate, PostCreate, ThreadResponse, PostResponse
+from app.db.redis import RedisManager
+from app.posts.schemas.post_schemas import  PostCreate, PostResponse
+from app.posts.schemas.thread_schemas import ThreadPostList
 
 logger = logging.getLogger(__name__)
 
 class ThreadService:
+    def __init__(self):
+        self.redis_manager = RedisManager()
     async def start_thread(
         self,
         session: AsyncSession,
@@ -45,7 +49,7 @@ class ThreadService:
             
             return {
                 "thread_id": thread.id,
-                "status": thread.status.value,
+                "status": thread.status.name,
                 "first_post": PostResponse(
                     id=first_post.id,
                     content=first_post.content,
@@ -198,54 +202,78 @@ class ThreadService:
                 detail="Failed to reactivate thread"
             )
     async def get_thread_posts(
-        self,
-        session: AsyncSession,
-        thread_id: int,
-        skip: int = 0,
-        limit: int = 20
-    ) -> Dict:
-        """Get all posts in a thread, ordered by position"""
-        # Verify thread exists
-        thread = await self._get_thread_with_creator(session, thread_id)
-        if not thread:
-            raise HTTPException(status_code=404, detail="Thread not found")
+            self,
+            session: AsyncSession,
+            thread_id: int,
+            skip: int = 0,
+            limit: int = 20
+        ) -> ThreadPostList:
+            """Get all posts in a thread, ordered by position"""
+            cache_key = f"thread_posts:{thread_id}:{skip}:{limit}"
+            cached_data = await self.redis_manager.get_post(cache_key)
+            if cached_data:
+                return ThreadPostList(**cached_data)
+            
+            # Get thread with creator info
+            thread_query = (
+                select(Thread, User.username.label('creator_username'))
+                .join(User, Thread.creator_id == User.id)
+                .where(Thread.id == thread_id)
+            )
+            thread_result = await session.execute(thread_query)
+            thread_record = thread_result.first()
+            if not thread_record:
+                raise HTTPException(status_code=404, detail="Thread not found")
+            
+            thread, creator_username = thread_record
 
-        # Get posts with author info
-        query = (
-            select(Post)
-            .options(joinedload(Post.author))
-            .where(Post.thread_id == thread_id)
-            .order_by(Post.position_in_thread)
-        )
+            # Get posts with explicitly selected fields as a tuple
+            posts_query = (
+                select(
+                    Post.id,
+                    Post.content,
+                    Post.created_at,
+                    Post.position_in_thread,
+                    User.username
+                )
+                .join(User, Post.author_id == User.id)
+                .where(Post.thread_id == thread_id)
+                .order_by(Post.position_in_thread)
+            )
 
-        total = await session.scalar(
-            select(func.count()).select_from(query.subquery())
-        )
+            total = await session.scalar(
+                select(func.count())
+                .select_from(Post)
+                .where(Post.thread_id == thread_id)
+            )
 
-        result = await session.execute(
-            query.offset(skip).limit(limit)
-        )
-        
-        posts = result.unique().scalars().all()
+            posts_result = await session.execute(posts_query.offset(skip).limit(limit))
+            # Get records as tuples with known positions
+            post_records: List[Tuple[int, str, datetime, int, str]] = posts_result.all()
 
-        return {
-            "thread_id": thread_id,
-            "creator_username": thread.author.username,
-            "created_at": thread.created_at,
-            "posts": [
-                PostResponse(
-                    id=post.id,
-                    content=post.content,
-                    created_at=post.created_at,
-                    author_username=post.author.username,
-                    thread_id=thread_id,
-                    position_in_thread=post.position_in_thread
-                ) for post in posts
-            ],
-            "total_posts": total,
-            "skip": skip,
-            "limit": limit
-        }
+            response_data = ThreadPostList(
+                thread_id=thread_id,
+                creator_username=creator_username,
+                created_at=thread.created_at,
+                posts=[
+                    PostResponse(
+                        id=record[0],  # id
+                        content=record[1],  # content
+                        created_at=record[2],  # created_at
+                        author_username=record[4],  # username
+                        thread_id=thread_id,
+                        position_in_thread=record[3]  # position_in_thread
+                    ) for record in post_records
+                ],
+                total_posts=total,
+                skip=skip,
+                limit=limit
+            )
+
+            # Cache the result
+            await self.redis_manager.set_post(cache_key, response_data.dict())
+
+            return response_data
 
     async def delete_from_thread(
         self,
@@ -287,51 +315,87 @@ class ThreadService:
             )
 
     async def get_user_threads(
-        self,
-        session: AsyncSession,
-        user_id: int,
-        status: Optional[ThreadStatus] = None,
-        skip: int = 0,
-        limit: int = 20
-    ) -> Dict:
-        """Get user's threads with optional status filter"""
-        query = (
-            select(Thread)
-            .options(joinedload(Thread.author))
-            .where(Thread.creator_id == user_id)
-        )
+            self,
+            session: AsyncSession,
+            user_id: int,
+            status: Optional[ThreadStatus] = None,
+            skip: int = 0,
+            limit: int = 20
+        ) -> Dict:
+            """Get user's threads with optional status filter"""
+            # Build the query with explicit field selection
+            query = (
+                select(
+                    Thread.id,
+                    Thread.status,
+                    Thread.created_at,
+                    Thread.completed_at,
+                    User.username
+                )
+                .join(User, Thread.creator_id == User.id)
+                .where(Thread.creator_id == user_id)
+            )
 
-        if status:
-            query = query.where(Thread.status == status)
+            if status:
+                query = query.where(Thread.status == status)
 
-        query = query.order_by(Thread.created_at.desc())
+            query = query.order_by(Thread.created_at.desc())
 
-        total = await session.scalar(
-            select(func.count()).select_from(query.subquery())
-        )
+            total = await session.scalar(
+                select(func.count())
+                .select_from(Thread)
+                .where(Thread.creator_id == user_id)
+            )
 
-        result = await session.execute(
-            query.offset(skip).limit(limit)
-        )
-        
-        threads = result.unique().scalars().all()
+            # Execute query and get results as tuples
+            result = await session.execute(query.offset(skip).limit(limit))
+            threads: List[Tuple[int, ThreadStatus, datetime, Optional[datetime], str]] = result.all()
 
-        return {
-            "items": [
-                {
-                    "thread_id": thread.id,
-                    "status": thread.status.value,
-                    "created_at": thread.created_at,
-                    "completed_at": thread.completed_at,
-                    "creator_username": thread.author.username,
-                    "first_post": await self._get_first_post(session, thread.id)
+            # Process results
+            return {
+                "items": [
+                    {
+                        "thread_id": thread[0],
+                        "status": ThreadStatus(thread[1]).value,  # Using .name for Enum
+                        "created_at": thread[2],
+                        "completed_at": thread[3],
+                        "creator_username": thread[4],
+                        "first_post": await self._get_first_post(session, thread[0])
+                    }
+                    for thread in threads
+                ],
+                "total": total,
+                "skip": skip,
+                "limit": limit
+            }
+
+    async def _get_first_post(
+            self,
+            session: AsyncSession,
+            thread_id: int
+        ) -> Optional[Dict]:
+            """Get first post of a thread"""
+            result = await session.execute(
+                select(
+                    Post.id,
+                    Post.content,
+                    Post.created_at,
+                    User.username
+                )
+                .join(User, Post.author_id == User.id)
+                .where(Post.thread_id == thread_id)
+                .where(Post.position_in_thread == 1)
+            )
+            post_record = result.first()
+            
+            if post_record:
+                return {
+                    "id": post_record[0],
+                    "content": post_record[1],
+                    "created_at": post_record[2],
+                    "author_username": post_record[3]
                 }
-                for thread in threads
-            ],
-            "total": total,
-            "skip": skip,
-            "limit": limit
-        }
+            return None    
 
     # Helper methods
     async def _get_thread_with_creator(

@@ -4,11 +4,11 @@ from typing import Optional
 from app.auth.dependencies import current_active_user
 from app.db.base import get_async_session
 from app.db.models import User
-from app.posts.services.core_post_service import CorePostService
-from app.posts.schemas import PostCreate, PostUpdate, PostResponse
+from app.posts.services.core_post_service import EnhancedCorePostService
+from app.posts.schemas.post_schemas import PostCreate, PostUpdate, PostResponse
 
 router = APIRouter(prefix="/posts", tags=["posts"])
-service = CorePostService()
+service = EnhancedCorePostService()
 
 @router.post("/", response_model=PostResponse)
 async def create_post(
