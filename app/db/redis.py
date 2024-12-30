@@ -1,9 +1,8 @@
 from redis.asyncio import Redis, ConnectionPool
-from typing import Optional, Any, Union, Dict, List
+from typing import Optional, Any, Dict, List
 import json
 import logging
 from functools import wraps
-from datetime import datetime, timedelta
 
 from app.core.config import settings
 
@@ -38,6 +37,16 @@ class RedisManager:
         await self._pool.disconnect()
 
     # Post-related methods
+    async def scan_keys(self, pattern: str, count: int = 1000) -> List[str]:
+        """Scan Redis keys matching a pattern"""
+        try:
+            keys = []
+            async for key in self.redis.iscan(match=pattern, count=count):
+                keys.append(key)
+            return keys
+        except Exception as e:
+            logger.error(f"Redis scan error for pattern {pattern}: {e}")
+            return []
     async def get_post(self, post_id: int) -> Optional[Dict]:
         """Get post from cache"""
         try:
@@ -194,7 +203,12 @@ class RedisManager:
         except Exception as e:
             logger.error(f"Redis health check failed: {e}")
             return False
-
+    async def delete_key(self, key: str):
+        """Delete a key from Redis."""
+        try:
+            await self.client.delete(key)
+        except Exception as e:
+            logger.error(f"Error deleting key: {e}")
     # Context manager support
     async def __aenter__(self):
         return self

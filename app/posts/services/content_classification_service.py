@@ -31,9 +31,9 @@ class ContentClassificationService:
         self.entity_recognizer = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
         
         # Collections
-        self.trending_collection = self.mongodb.trending_metrics
-        self.topic_collection = self.mongodb.topic_classifications
-        self.moderation_collection = self.mongodb.content_moderation
+        self.trending_collection = self.mongodb.get_collection("trending_metrics")
+        self.topic_collection = self.mongodb.get_collection("topic_classifications")
+        self.moderation_collection = self.mongodb.get_collection("moderation_results")
 
 
     async def process_content(

@@ -2,7 +2,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, and_, func
 from typing import List, Dict, Optional
 import logging
-from datetime import datetime, timedelta
 
 from app.db.models import Post, User, Hashtag, post_hashtags
 from app.db.qdrant import QdrantManager
