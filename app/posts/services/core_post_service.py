@@ -12,7 +12,7 @@ import json
 
 from app.db.models import Hashtag, Post, User, post_mentions, post_hashtags
 from app.db.redis import RedisManager
-from posts.schemas.post_schemas import PostCreate, PostUpdate, PostResponse
+from app.posts.schemas.post_schemas import PostCreate, PostUpdate, PostResponse
 
 logger = logging.getLogger(__name__)
 

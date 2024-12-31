@@ -1,9 +1,12 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from app import settings
 from app.auth.router import router as auth_router
 from app.posts.router import router as posts_router
 from app.db.mongodb import create_mongodb_indexes
 from app.db.qdrant import QdrantManager
+
+app = FastAPI(title=settings.PROJECT_NAME)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -22,6 +25,11 @@ app = FastAPI(
     title="FastAPI Users Auth",
     lifespan=lifespan
 )
+
+# Create MongoDB indexes on startup
+@app.on_event("startup")
+async def startup_event():
+    await create_mongodb_indexes()
 
 # Include routers
 app.include_router(auth_router, prefix="/auth", tags=["auth"])
