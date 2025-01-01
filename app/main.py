@@ -6,8 +6,7 @@ from app.posts.router import router as posts_router
 from app.db.mongodb import create_mongodb_indexes
 from app.db.qdrant import QdrantManager
 
-app = FastAPI(title=settings.PROJECT_NAME)
-
+ 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -32,8 +31,8 @@ async def startup_event():
     await create_mongodb_indexes()
 
 # Include routers
-app.include_router(auth_router, prefix="/auth", tags=["auth"])
-app.include_router(posts_router, prefix="/api", tags=["posts"])
+app.include_router(auth_router, prefix="/api/v1", tags=["auth"])
+app.include_router(posts_router, prefix="/api/v1", tags=["posts"])
 
 if __name__ == "__main__":
     import uvicorn

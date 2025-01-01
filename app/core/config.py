@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings
 from typing import Optional
-
+ 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Social Media API"
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/fastapi_auth"

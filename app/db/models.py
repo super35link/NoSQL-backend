@@ -55,6 +55,7 @@ class Post(Base):
     content: Mapped [str] = Column(String(500), nullable=False)
     author_id: Mapped[int] = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     created_at: Mapped[datetime] = Column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = Column(DateTime, onupdate=datetime.utcnow, nullable=True)
 
     # Thread fields
     thread_id: Mapped[int] = Column(Integer, ForeignKey('threads.id', ondelete='CASCADE'), nullable=True)

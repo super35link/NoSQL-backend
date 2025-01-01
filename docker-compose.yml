@@ -42,12 +42,14 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     volumes:
       - .:/app
+      - ml_models:/root/.cache/huggingface 
     ports:
       - "8000:8000"
     depends_on:
       - db
       - mongodb
       - qdrant
+      - redis
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/fastapi_auth
       - MONGODB_URL=mongodb://mongodb:27017
@@ -63,8 +65,7 @@ services:
       - MAIL_STARTTLS=false
       - MAIL_SSL_TLS=false
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=your_redis_password  # if needed
-      - REDIS_MAX_CONNECTIONS=20
+      - REDIS_MAX_CONNECTIONS=10
       - REDIS_POST_CACHE_TTL=3600
       - REDIS_USER_CACHE_TTL=3600
 
@@ -77,3 +78,4 @@ volumes:
     name: fastapi-qdrant-data
   fastapi-redis-data:
     name: fastapi-redis-data
+  ml_models:

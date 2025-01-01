@@ -6,43 +6,61 @@ from typing import Dict, Literal, Optional, List, Set
 from datetime import datetime
 import logging
 from fastapi import HTTPException, status
-from redis import Redis
 from pydantic import ValidationError
 import json
+from app.db.associated_tables import post_hashtags, post_mentions
 
-from app.db.models import Hashtag, Post, User, post_mentions, post_hashtags
+from app.db.models import Hashtag, Post, User
 from app.db.redis import RedisManager
 from app.posts.schemas.post_schemas import PostCreate, PostUpdate, PostResponse
 
 logger = logging.getLogger(__name__)
 
+
+
+
 class PostCache:
     """Handle post caching operations"""
-    def __init__(self, redis_client: Redis):
-        self.redis = redis_client
-        self.cache_ttl = 3600  # 1 hour
+    def __init__(self, redis_manager: RedisManager, cache_ttl: int = 3600):
+        self.redis_manager = redis_manager
+        self.cache_ttl = cache_ttl
 
     async def get_post(self, post_id: int) -> Optional[Dict]:
         """Get post from cache"""
-        cached = await self.redis.get(f"post:{post_id}")
-        return json.loads(cached) if cached else None
+        try:
+            key = f"post:{post_id}"
+            data = await self.redis_manager.redis.get(key)
+            return json.loads(data) if data else None
+        except Exception as e:
+            logger.error(f"Redis error getting post {post_id}: {e}")
+            return None
 
     async def set_post(self, post_id: int, post_data: Dict):
         """Cache post data"""
-        await self.redis.setex(
-            f"post:{post_id}",
-            self.cache_ttl,
-            json.dumps(post_data)
-        )
+        try:
+            key = f"post:{post_id}"
+            await self.redis_manager.redis.setex(
+                key,
+                self.cache_ttl,
+                json.dumps(post_data)
+            )
+        except Exception as e:
+            logger.error(f"Redis error setting post {post_id}: {e}")
 
     async def invalidate_post(self, post_id: int):
         """Remove post from cache"""
-        await self.redis.delete(f"post:{post_id}")
+        try:
+            key = f"post:{post_id}"
+            await self.redis_manager.redis.delete(key)
+        except Exception as e:
+            logger.error(f"Redis error invalidating post {post_id}: {e}")
 
 class PostValidator:
     """Validate post content and metadata"""
     def __init__(self, cache: PostCache):
         self.cache = cache
+    
+    async def _contains_inappropriate_content(self, content: str) -> bool: False
     
     async def validate_content(self, content: str) -> bool:
         """Validate post content"""
@@ -60,22 +78,28 @@ class PostValidator:
 
     async def validate_rate_limit(self, user_id: int) -> bool:
         """Check if user has exceeded post rate limit"""
-        window_key = f"post_rate:{user_id}:{int(datetime.utcnow().timestamp() // 3600)}"
-        count = await self.cache.redis.get(window_key)
-        
-        if count and int(count) >= 100:  # 100 posts per hour limit
-            raise ValidationError("Post rate limit exceeded")
+        try:
+            window_key = f"post_rate:{user_id}:{int(datetime.utcnow().timestamp() // 3600)}"
             
-        pipe = self.cache.redis.pipeline()
-        pipe.incr(window_key)
-        pipe.expire(window_key, 3600)  # 1 hour window
-        await pipe.execute()
-        return True
-
-    async def _contains_inappropriate_content(self, content: str) -> bool:
-        """Check content against moderation rules"""
-        # Implement content moderation logic
-        return False
+            # Get current count using cache's redis_manager
+            count = await self.cache.redis_manager.redis.get(window_key)
+            
+            if count and int(count) >= 100:  # 100 posts per hour limit
+                raise ValidationError("Post rate limit exceeded")
+                
+            # Use cache's redis_manager for pipeline
+            pipe = self.cache.redis_manager.redis.pipeline()
+            pipe.incr(window_key)
+            pipe.expire(window_key, 3600)  # 1 hour window
+            await pipe.execute()
+            
+            return True
+            
+        except ValidationError:
+            raise
+        except Exception as e:
+            logger.error("Rate limit check failed: %s", str(e))
+            return True  # Fail open on errors
 
 class EnhancedCorePostService:
     """Enhanced post service with caching and validation"""
@@ -148,7 +172,11 @@ class EnhancedCorePostService:
             )
             
             # Cache the new post
-            await self.cache.set_post(post.id, response.dict())
+            if self.redis_manager:
+                try:
+                    await self.redis_manager.set_post(post.id, response.dict())
+                except Exception as e:
+                    logger.warning(f"Failed to cache post: {e}")
             
             return response
 
@@ -237,13 +265,15 @@ class EnhancedCorePostService:
             # Extract new hashtags and mentions if content is updated
             if post_data.content:
                 # Clear existing hashtags and mentions
-                await session.execute(
-                    delete(post_hashtags).where(post_hashtags.c.post_id == post_id)
-                )
-                await session.execute(
-                    delete(post_mentions).where(post_mentions.c.post_id == post_id)
-                )
+                post_id_column = post_hashtags.columns.get('post_id')
+                mention_id_column = post_mentions.columns.get('post_id')
                 
+                await session.execute(
+                    delete(post_hashtags).where(post_id_column == post_id)
+                )
+                await session.execute(
+                    delete(post_mentions).where(mention_id_column == post_id)
+                )
                 # Extract and store new hashtags and mentions
                 hashtags = await self._extract_entities(session, post_data.content, "hashtag")
                 mentioned_user_ids = await self._extract_entities(session, post_data.content, "mention")
