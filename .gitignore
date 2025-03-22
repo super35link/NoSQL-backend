@@ -20,7 +20,7 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environment
+# Virtual Environments
 venv/
 ENV/
 env/
@@ -39,3 +39,5 @@ env/
 
 # Database
 *.sqlite3.DS_Store
+
+.DS_Storess
