@@ -8,16 +8,22 @@ import logging
 from fastapi import HTTPException, status
 from pydantic import ValidationError
 import json
-from app.db.associated_tables import post_hashtags, post_mentions
 
+from app.db.associated_tables import post_hashtags, post_mentions
 from app.db.models import Hashtag, Post, User
 from app.db.redis import RedisManager
 from app.posts.schemas.post_schemas import PostCreate, PostUpdate, PostResponse
+from app.posts.services.embedding_service import PostEmbeddingService
+from app.posts.services.hashtag_service import HashtagService  # Import HashtagService
 
 logger = logging.getLogger(__name__)
 
-
-
+class DateTimeEncoder(json.JSONEncoder):
+    """JSON encoder that handles datetime objects."""
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
 
 class PostCache:
     """Handle post caching operations"""
@@ -29,6 +35,7 @@ class PostCache:
         """Get post from cache"""
         try:
             key = f"post:{post_id}"
+            # Use the RedisManager's redis property
             data = await self.redis_manager.redis.get(key)
             return json.loads(data) if data else None
         except Exception as e:
@@ -39,10 +46,12 @@ class PostCache:
         """Cache post data"""
         try:
             key = f"post:{post_id}"
+            # Use custom encoder for datetime objects
+            serialized_data = json.dumps(post_data, cls=DateTimeEncoder)
             await self.redis_manager.redis.setex(
                 key,
                 self.cache_ttl,
-                json.dumps(post_data)
+                serialized_data
             )
         except Exception as e:
             logger.error(f"Redis error setting post {post_id}: {e}")
@@ -57,10 +66,12 @@ class PostCache:
 
 class PostValidator:
     """Validate post content and metadata"""
-    def __init__(self, cache: PostCache):
-        self.cache = cache
+    def __init__(self, redis_manager: RedisManager):
+        self.redis_manager = redis_manager
     
-    async def _contains_inappropriate_content(self, content: str) -> bool: False
+    async def _contains_inappropriate_content(self, content: str) -> bool:
+        # Placeholder for content moderation logic
+        return False
     
     async def validate_content(self, content: str) -> bool:
         """Validate post content"""
@@ -81,18 +92,14 @@ class PostValidator:
         try:
             window_key = f"post_rate:{user_id}:{int(datetime.utcnow().timestamp() // 3600)}"
             
-            # Get current count using cache's redis_manager
-            count = await self.cache.redis_manager.redis.get(window_key)
-            
-            if count and int(count) >= 100:  # 100 posts per hour limit
+            # Use the redis_manager's check_rate_limit method
+            if not await self.redis_manager.check_rate_limit(
+                key=window_key,
+                limit=100,  # 100 posts per hour limit
+                window_seconds=3600
+            ):
                 raise ValidationError("Post rate limit exceeded")
                 
-            # Use cache's redis_manager for pipeline
-            pipe = self.cache.redis_manager.redis.pipeline()
-            pipe.incr(window_key)
-            pipe.expire(window_key, 3600)  # 1 hour window
-            await pipe.execute()
-            
             return True
             
         except ValidationError:
@@ -103,11 +110,13 @@ class PostValidator:
 
 class EnhancedCorePostService:
     """Enhanced post service with caching and validation"""
-    
     def __init__(self, cache: PostCache, validator: PostValidator):
         self.cache = cache
         self.validator = validator
-        self.redis_manager = RedisManager()
+        # Use the redis_manager from cache instead of creating a new one
+        self.redis_manager = cache.redis_manager
+        # Initialize HashtagService for MongoDB integration
+        self.hashtag_service = HashtagService()
         
     async def create_post(
         self, 
@@ -115,28 +124,13 @@ class EnhancedCorePostService:
         user_id: int, 
         post_data: PostCreate
     ) -> PostResponse:
-        """Create a new post with validation and caching"""
+        """Create a new post with validation, embedding generation, and caching"""
         # Validate user exists
         user = await self._get_user(session, user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        # Validate content
-        await self.validator.validate_content(post_data.content)
-
         # Validate content and rate limit
-        rate_limit_key = f"post_rate:{user_id}"
-        if not await self.redis_manager.check_rate_limit(
-            key=rate_limit_key,
-            limit=100,  # 100 posts per hour
-            window_seconds=3600
-        ):
-            raise HTTPException(
-            status_code=429,
-            detail="Post rate limit exceeded"
-        )
-            
-         # Validate content and rate limit
         await self.validator.validate_content(post_data.content)
         await self.validator.validate_rate_limit(user_id)
 
@@ -144,23 +138,27 @@ class EnhancedCorePostService:
         hashtags = await self._extract_entities(session, post_data.content, "hashtag")
         mentioned_user_ids = await self._extract_entities(session, post_data.content, "mention")
 
-
-        # Create post instance
-        post = Post(
-            author_id=user_id,
-            content=post_data.content,
-            reply_to_id=post_data.reply_to_id
-        )
-
+        # First transaction: Create the post and store hashtags in the database
         try:
+            # Create post instance
+            post = Post(
+                author_id=user_id,
+                content=post_data.content,
+                reply_to_id=post_data.reply_to_id
+            )
+
             session.add(post)
-            await session.commit()
-            await session.refresh(post)
+            # Flush to get ID but don't commit yet
+            await session.flush()
             
-             # Store hashtags and mentions
+            # Store hashtags and mentions
             await self._batch_store_hashtags(session, post.id, hashtags)
             await self._batch_store_mentions(session, post.id, mentioned_user_ids)
             
+            # CRITICAL: Commit the database transaction to ensure hashtags are stored
+            # even if embedding generation fails
+            await session.commit()
+            await session.refresh(post)
             
             # Prepare response
             response = PostResponse(
@@ -168,73 +166,115 @@ class EnhancedCorePostService:
                 content=post.content,
                 created_at=post.created_at,
                 author_username=user.username,
-                reply_to_id=post.reply_to_id
+                author_id=user_id,
+                reply_to_id=post.reply_to_id,
+                like_count=0,
+                view_count=0,
+                repost_count=0,
+                hashtags=list(hashtags) if hashtags else []
             )
             
             # Cache the new post
-            if self.redis_manager:
-                try:
-                    await self.redis_manager.set_post(post.id, response.dict())
-                except Exception as e:
-                    logger.warning(f"Failed to cache post: {e}")
+            try:
+                post_dict = response.dict()
+                await self.cache.set_post(post.id, post_dict)
+            except Exception as e:
+                logger.warning(f"Failed to cache post: {e}")
+                # Don't let caching errors affect the main workflow
             
+            # Second operation: Generate and store embedding
+            # This is now outside the main database transaction
+            try:
+                embedding_service = PostEmbeddingService()
+                await embedding_service.process_post(
+                    post_id=post.id,
+                    content=post.content,
+                    metadata={
+                        "author_id": user_id,
+                        "created_at": post.created_at.isoformat(),
+                        "hashtags": list(hashtags) if hashtags else []
+                    }
+                )
+            except Exception as e:
+                # Log the error but don't fail the whole operation
+                logger.error(f"Error generating embedding: {e}")
+                # The post is already committed, so we don't need to roll back
+            
+            # NEW: Process hashtags in MongoDB for trending metrics and analytics
+            # Do this after the main transaction is committed
+            try:
+                if hashtags:
+                    # Process each hashtag in MongoDB
+                    for tag in hashtags:
+                        await self._record_hashtag_in_mongodb(
+                            tag=tag,
+                            post_id=post.id,
+                            user_id=user_id
+                        )
+                    logger.info(f"Processed {len(hashtags)} hashtags in MongoDB for post {post.id}")
+            except Exception as e:
+                # Log the error but don't fail the operation since the post is already created
+                logger.error(f"Error processing hashtags in MongoDB: {e}")
+                
             return response
 
         except Exception as e:
-            await session.rollback()
+            # Only roll back if we haven't committed yet
+            try:
+                await session.rollback()
+            except:
+                pass
             logger.error(f"Error creating post: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to create post"
             )
 
-
-    async def get_post(
-        self, 
-        session: AsyncSession, 
-        post_id: int
-    ) -> Optional[PostResponse]:
-        """Get a post with caching"""
-        # Try cache first
-        cached_post = await self.redis_manager.get_post(post_id)
-        if cached_post:
-            return PostResponse(**cached_post)
+    async def _record_hashtag_in_mongodb(
+        self,
+        tag: str,
+        post_id: int,
+        user_id: int
+    ) -> None:
+        """Record hashtag usage in MongoDB for trending analytics"""
+        try:
+            # Use HashtagService to record hashtag in trending metrics
+            await self.hashtag_service._record_hashtag_in_trending(
+                hashtag=tag,
+                post_id=post_id,
+                user_id=user_id,
+                engagement_value=1.0  # New posts have higher engagement value
+            )
             
-        # If not in cache, query database
-        stmt = (
-            select(Post, User.username)
-            .join(Post, User.id == Post.author_id)  # Join with User table
-            .options(contains_eager(Post.author))  # Load author data eagerly
-            .where(Post.id == post_id)
-        )
-        
-        result = await session.execute(stmt)
-        post: Optional[Post] = result.unique().scalar_one_or_none()
-        
-        row = result.first()
-        if not row:
-                return None
-        
-        post, username = row
+            # Check if user follows this hashtag and update engagement if they do
+            # This helps with personalized recommendations
+            follows = await self.hashtag_service.check_follows_hashtags(
+                user_id=user_id,
+                hashtags=[tag]
+            )
             
-        response = PostResponse(
-            # Fields from PostBase
-            content=post.content,
-            reply_to_id=post.reply_to_id,
-            
-            # Fields from PostResponse
-            id=post.id,
-            created_at=post.created_at,
-            author_username=username,
-            like_count=post.like_count,  # Make sure these fields exist in Post model
-            view_count=post.view_count,
-            repost_count=post.repost_count
-        )
-        
-        # Cache the post
-        await self.redis_manager.set_post(post_id, response.dict())
-        
-        return response
+            if follows.get(tag, False):
+                # User is following this hashtag, update follow engagement
+                await self.hashtag_service.hashtag_follows.update_one(
+                    {
+                        "user_id": user_id,
+                        "hashtag": tag
+                    },
+                    {
+                        "$set": {"last_interaction": datetime.utcnow()},
+                        "$inc": {"engagement_level": 0.5},  # Using a followed hashtag shows high engagement
+                        "$push": {
+                            "recent_interactions": {
+                                "type": "used",
+                                "timestamp": datetime.utcnow(),
+                                "post_id": post_id
+                            }
+                        }
+                    }
+                )
+        except Exception as e:
+            logger.error(f"Error recording hashtag {tag} in MongoDB: {e}")
+            # Don't re-raise to ensure post creation succeeds even if MongoDB fails
 
     async def update_post(
         self, 
@@ -263,7 +303,18 @@ class EnhancedCorePostService:
 
         try:
             # Extract new hashtags and mentions if content is updated
+            old_hashtags = set()
+            new_hashtags = set()
+            
             if post_data.content:
+                # Get existing hashtags before clearing
+                result = await session.execute(
+                    select(Hashtag.tag)
+                    .join(post_hashtags, post_hashtags.c.hashtag_id == Hashtag.id)
+                    .where(post_hashtags.c.post_id == post_id)
+                )
+                old_hashtags = {row[0] for row in result}
+                
                 # Clear existing hashtags and mentions
                 post_id_column = post_hashtags.columns.get('post_id')
                 mention_id_column = post_mentions.columns.get('post_id')
@@ -275,10 +326,10 @@ class EnhancedCorePostService:
                     delete(post_mentions).where(mention_id_column == post_id)
                 )
                 # Extract and store new hashtags and mentions
-                hashtags = await self._extract_entities(session, post_data.content, "hashtag")
+                new_hashtags = await self._extract_entities(session, post_data.content, "hashtag")
                 mentioned_user_ids = await self._extract_entities(session, post_data.content, "mention")
                 
-                await self._batch_store_hashtags(session, post_id, hashtags)
+                await self._batch_store_hashtags(session, post_id, new_hashtags)
                 await self._batch_store_mentions(session, post_id, mentioned_user_ids)
 
             # Update post content
@@ -291,13 +342,30 @@ class EnhancedCorePostService:
             # Invalidate cache
             await self.cache.invalidate_post(post_id)
             
+            # NEW: Update MongoDB hashtag records if hashtags changed
+            if post_data.content and (old_hashtags != new_hashtags):
+                try:
+                    # Remove post from old hashtags that were removed
+                    removed_hashtags = old_hashtags - new_hashtags
+                    for tag in removed_hashtags:
+                        await self._remove_hashtag_from_post(tag, post_id, user_id)
+                    
+                    # Add new hashtags that weren't in the old post
+                    added_hashtags = new_hashtags - old_hashtags
+                    for tag in added_hashtags:
+                        await self._record_hashtag_in_mongodb(tag, post_id, user_id)
+                except Exception as e:
+                    logger.error(f"Error updating MongoDB hashtag records: {e}")
+                    # Don't re-raise since the main update is already committed
+            
             # Return updated post
             return PostResponse(
                 id=db_post.id,
                 content=db_post.content,
                 created_at=db_post.created_at,
                 author_username=(await self._get_user(session, user_id)).username,
-                reply_to_id=db_post.reply_to_id
+                reply_to_id=db_post.reply_to_id,
+                hashtags=list(new_hashtags) if new_hashtags else list(old_hashtags)
             )
 
         except Exception as e:
@@ -307,6 +375,27 @@ class EnhancedCorePostService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to update post"
             )
+
+    async def _remove_hashtag_from_post(
+        self,
+        tag: str,
+        post_id: int,
+        user_id: int
+    ) -> None:
+        """Remove hashtag-post association in MongoDB"""
+        try:
+            # This is a soft removal that marks the hashtag as removed from the post
+            # Keeping historic data for analytics but marking it as inactive
+            await self.hashtag_service.trending_collection.insert_one({
+                "type": "hashtag_removal",
+                "tag": tag.lower(),
+                "post_id": post_id,
+                "user_id": user_id,
+                "timestamp": datetime.utcnow(),
+                "engagement_value": 0  # Zero engagement since it's removed
+            })
+        except Exception as e:
+            logger.error(f"Error removing hashtag {tag} from post in MongoDB: {e}")
 
     async def delete_post(
         self,
@@ -319,6 +408,17 @@ class EnhancedCorePostService:
         post = await self.get_post(session, post_id)
         if not post:
             raise HTTPException(status_code=404, detail="Post not found")
+
+        # Get existing hashtags before deleting
+        try:
+            result = await session.execute(
+                select(Hashtag.tag)
+                .join(post_hashtags, post_hashtags.c.hashtag_id == Hashtag.id)
+                .where(post_hashtags.c.post_id == post_id)
+            )
+            post_hashtags_list = {row[0] for row in result}
+        except Exception:
+            post_hashtags_list = set()
 
         result = await session.execute(
             select(Post).where(Post.id == post_id)
@@ -341,6 +441,14 @@ class EnhancedCorePostService:
             # Invalidate user's post count cache
             await self.cache.invalidate_post(f"post_count:{user_id}")
             
+            # NEW: Update MongoDB hashtag records for deleted post
+            if post_hashtags_list:
+                try:
+                    for tag in post_hashtags_list:
+                        await self._record_hashtag_deletion(tag, post_id, user_id)
+                except Exception as e:
+                    logger.error(f"Error updating MongoDB for deleted post hashtags: {e}")
+            
             return True
         except Exception as e:
             await session.rollback()
@@ -349,6 +457,80 @@ class EnhancedCorePostService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to delete post"
             )
+
+    async def _record_hashtag_deletion(
+        self,
+        tag: str,
+        post_id: int,
+        user_id: int
+    ) -> None:
+        """Record the deletion of a post with this hashtag in MongoDB"""
+        try:
+            # Record post deletion for this hashtag
+            await self.hashtag_service.trending_collection.insert_one({
+                "type": "post_deletion",
+                "tag": tag.lower(),
+                "post_id": post_id,
+                "user_id": user_id,
+                "timestamp": datetime.utcnow(),
+                "engagement_value": -1.0  # Negative engagement for deletion
+            })
+        except Exception as e:
+            logger.error(f"Error recording hashtag {tag} deletion in MongoDB: {e}")
+
+    async def get_post(
+        self, 
+        session: AsyncSession, 
+        post_id: int
+    ) -> Optional[PostResponse]:
+        """Get a post with caching"""
+        # Try cache first
+        cached_post = await self.redis_manager.get_post(post_id)
+        if cached_post:
+            return PostResponse(**cached_post)
+            
+        # If not in cache, query database
+        try:
+            # Execute query
+            stmt = (
+                select(Post, User.username)
+                .join(User, User.id == Post.author_id)
+                .where(Post.id == post_id)
+            )
+            
+            result = await session.execute(stmt)
+            post_tuple = result.first()  # Get the first result as a tuple
+
+            if not post_tuple:
+                return None
+
+            post, username = post_tuple
+            
+            # Get hashtags for this post
+            hashtags_result = await session.execute(
+                select(Hashtag.tag)
+                .join(post_hashtags, post_hashtags.c.hashtag_id == Hashtag.id)
+                .where(post_hashtags.c.post_id == post_id)
+            )
+            hashtags = [row[0] for row in hashtags_result]
+            
+            response = PostResponse(
+                id=post.id,
+                content=post.content,
+                created_at=post.created_at,
+                author_username=username,
+                reply_to_id=post.reply_to_id,
+                like_count=post.like_count or 0,
+                view_count=post.view_count or 0,
+                repost_count=post.repost_count or 0,
+                hashtags=hashtags
+            )
+            
+            return response
+
+        except Exception as e:
+            logger.error(f"Error getting post {post_id}: {e}")
+            return None
 
     async def get_posts_by_cursor(
         self,
@@ -392,6 +574,21 @@ class EnhancedCorePostService:
             # Get the next cursor
             next_cursor = posts[-1].created_at if posts and has_more else None
             
+            # Get hashtags for the posts
+            post_ids = [post.id for post in posts]
+            hashtags_result = await session.execute(
+                select(post_hashtags.c.post_id, Hashtag.tag)
+                .join(Hashtag, post_hashtags.c.hashtag_id == Hashtag.id)
+                .where(post_hashtags.c.post_id.in_(post_ids))
+            )
+            
+            # Group hashtags by post_id
+            post_hashtags_map = {}
+            for post_id, tag in hashtags_result:
+                if post_id not in post_hashtags_map:
+                    post_hashtags_map[post_id] = []
+                post_hashtags_map[post_id].append(tag)
+            
             return {
                 "items": [
                     PostResponse(
@@ -399,7 +596,11 @@ class EnhancedCorePostService:
                         content=post.content,
                         created_at=post.created_at,
                         author_username=post.author.username,
-                        reply_to_id=post.reply_to_id
+                        reply_to_id=post.reply_to_id,
+                        like_count=post.like_count or 0,
+                        view_count=post.view_count or 0, 
+                        repost_count=post.repost_count or 0,
+                        hashtags=post_hashtags_map.get(post.id, [])
                     ) for post in posts
                 ],
                 "next_cursor": next_cursor.isoformat() if next_cursor else None,
@@ -459,6 +660,22 @@ class EnhancedCorePostService:
             )
 
         try:
+            # Get hashtags for all posts before deleting
+            hashtags_by_post = {}
+            try:
+                result = await session.execute(
+                    select(post_hashtags.c.post_id, Hashtag.tag)
+                    .join(Hashtag, post_hashtags.c.hashtag_id == Hashtag.id)
+                    .where(post_hashtags.c.post_id.in_(post_ids))
+                )
+                for post_id, tag in result:
+                    if post_id not in hashtags_by_post:
+                        hashtags_by_post[post_id] = []
+                    hashtags_by_post[post_id].append(tag)
+            except Exception:
+                # Continue even if we can't get hashtags
+                pass
+
             # Verify ownership of all posts first
             result = await session.execute(
                 select(Post)
@@ -484,7 +701,6 @@ class EnhancedCorePostService:
                 )
 
             # Delete posts in a single operation
-                # Delete posts in a single operation
             await session.execute(
                 delete(Post)
                 .where(Post.id.in_(post_ids))
@@ -498,6 +714,14 @@ class EnhancedCorePostService:
             
             # Invalidate user's post count cache
             await self.cache.invalidate_post(f"post_count:{user_id}")
+            
+            # Update MongoDB hashtag records for deleted posts
+            try:
+                for post_id, tags in hashtags_by_post.items():
+                    for tag in tags:
+                        await self._record_hashtag_deletion(tag, post_id, user_id)
+            except Exception as e:
+                logger.error(f"Error updating MongoDB for bulk deleted posts: {e}")
             
             return {
                 "deleted": post_ids,
@@ -535,7 +759,7 @@ class EnhancedCorePostService:
             
             if entity_type == "hashtag":
                 return {
-                    tag for tag in matches 
+                    tag.lower() for tag in matches  # Normalize hashtags to lowercase
                     if len(tag) <= 50 and not any(c.isspace() for c in tag)
                 }
             
@@ -582,61 +806,34 @@ class EnhancedCorePostService:
             
         # Create associations
         for tag in hashtags:
-            hashtag = existing_hashtags.get(tag) or new_hashtags.pop(0)
-            await session.execute(
-                post_hashtags.insert().values(
-                    post_id=post_id,
-                    hashtag_id=hashtag.id
+            hashtag = existing_hashtags.get(tag) or next((h for h in new_hashtags if h.tag == tag), None)
+            if hashtag:
+                await session.execute(
+                    post_hashtags.insert().values(
+                        post_id=post_id,
+                        hashtag_id=hashtag.id
+                    )
                 )
-            )
 
 
     async def _batch_store_mentions(
             self,
             session: AsyncSession,
             post_id: int,
-            mentions: set[str]
+            mentions: Set[int]  # Changed type hint to match actual usage
         ) -> None:
             """Store mentions with batching"""
             if not mentions:
                 return
-
-            # Get or fetch mentioned users in batch
-            existing_users = await session.execute(
-                select(User).where(User.username.in_(mentions))
-            )
-            existing_users = {u.username: u for u in existing_users.scalars()}
             
             # Create mention associations
-            for username in mentions:
-                if user := existing_users.get(username):
-                    await session.execute(
-                        post_mentions.insert().values(
-                            post_id=post_id,
-                            user_id=user.id
-                        )
+            for user_id in mentions:
+                await session.execute(
+                    post_mentions.insert().values(
+                        post_id=post_id,
+                        user_id=user_id
                     )
-
-            # Note: We silently skip mentions of non-existent users    
-
-    async def _store_mentions(
-        self,
-        session: AsyncSession,
-        post_id: int,
-        user_ids: Set[int]
-    ):
-        """Store post mentions in association table"""
-        if not user_ids:
-            return
-
-        # Create mention associations
-        for user_id in user_ids:
-            await session.execute(
-                post_mentions.insert().values(
-                    post_id=post_id,
-                    user_id=user_id
                 )
-            )
 
     async def _get_user(self, session: AsyncSession, user_id: int) -> Optional[User]:
         """Get user with caching"""
@@ -647,5 +844,19 @@ class EnhancedCorePostService:
             
         result = await session.get(User, user_id)
         if result:
-            await self.cache.set_post(f"user:{user_id}", result.__dict__)
+            # Here we need to extract only serializable attributes
+            user_dict = {
+                "id": result.id,
+                "username": result.username,
+                "email": result.email,
+                "is_active": result.is_active,
+                "is_superuser": result.is_superuser,
+                "is_verified": result.is_verified,
+                "first_name": result.first_name,
+                "last_name": result.last_name,
+                "created_at": result.created_at.isoformat() if result.created_at else None,
+                "updated_at": result.updated_at.isoformat() if result.updated_at else None
+            }
+            # Now cache only the serializable dict
+            await self.cache.set_post(f"user:{user_id}", user_dict)
         return result

@@ -15,6 +15,8 @@ class Settings(Base):
     timezone = Column(String, default="UTC")
     autoplay_videos = Column(Boolean, default=True)
     
+    preference = Column(String, nullable=True)
+    
     # Privacy Settings
     who_can_see_posts = Column(String, default="everyone")  # everyone/followers/nobody
     who_can_reply = Column(String, default="everyone")      # everyone/followers/mentioned

@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
-from app.auth.dependencies import current_active_user
+from app.auth.users import current_active_user
 from app.db.base import get_async_session
 from . import service
 from .schemas import ProfileRead, ProfileUpdate, ProfilePrivacyUpdate, ProfileStats, ProfileCollection

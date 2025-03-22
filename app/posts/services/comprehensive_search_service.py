@@ -1,10 +1,12 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, and_, func
+from sqlalchemy.orm import joinedload 
 from typing import List, Dict, Optional
 import logging
 
 from app.db.models import Post, User, Hashtag, post_hashtags
 from app.db.qdrant import QdrantManager
+from app.posts.schemas.post_response import PostListResponse, create_post_response
 from .embedding_service import PostEmbeddingService
 
 logger = logging.getLogger(__name__)
@@ -33,15 +35,29 @@ class SearchService:
         try:
             if search_type == "semantic":
                 return await self._semantic_search(
-                    query, filters, min_score, limit, offset
+                    session,  # Pass the session here
+                    query, 
+                    filters, 
+                    min_score, 
+                    limit, 
+                    offset
                 )
             elif search_type == "text":
                 return await self._text_search(
-                    session, query, filters, limit, offset
+                    session,
+                    query,
+                    filters,
+                    limit,
+                    offset
                 )
             else:  # combined
                 return await self._combined_search(
-                    session, query, filters, min_score, limit, offset
+                    session,
+                    query,
+                    filters,
+                    min_score,
+                    limit,
+                    offset
                 )
         except Exception as e:
             logger.error(f"Search error: {e}")
@@ -49,43 +65,112 @@ class SearchService:
 
     async def _semantic_search(
         self,
+        session: AsyncSession,
         query: str,
         filters: Optional[Dict],
         min_score: float,
         limit: int,
         offset: int
     ) -> Dict:
-        """Perform semantic search using Qdrant"""
-        # Generate query embedding
-        query_embedding = await self.embedding_service.generate_embedding(query)
+        try:
+            # Generate query embedding and search Qdrant
+            query_embedding = await self.embedding_service.generate_embedding(query)
+            qdrant_results = await self.qdrant.search_similar_posts(
+                query_vector=query_embedding,
+                filter_conditions=self._prepare_qdrant_filters(filters),
+                limit=limit + offset,
+                score_threshold=min_score
+            )
 
-        # Prepare Qdrant filters
-        qdrant_filter = self._prepare_qdrant_filters(filters)
+            if not qdrant_results:
+                return PostListResponse(
+                    items=[],
+                    total=0,
+                    type="semantic",
+                    has_more=False
+                ).model_dump()
 
-        # Search in Qdrant
-        results = await self.qdrant.search(
-            query_vector=query_embedding,
-            query_filter=qdrant_filter,
-            limit=limit + offset
-        )
+            # Get post IDs and scores
+            post_ids = [int(result["post_id"]) for result in qdrant_results]
+            scores_by_id = {int(result["post_id"]): result["score"] for result in qdrant_results}
 
-        # Process results
-        posts = results[offset:offset + limit]
-        return {
-            "items": [
-                {
-                    "post_id": post["id"],
-                    "content": post["payload"]["content"],
-                    "author_id": post["payload"]["author_id"],
-                    "created_at": post["payload"]["created_at"],
-                    "score": post["score"],
-                    "hashtags": post["payload"].get("hashtags", [])
+            # Fetch posts with authors and engagement data
+            posts_query = (
+                select(Post, User)
+                .join(User, Post.author_id == User.id)
+                .where(Post.id.in_(post_ids))
+                .options(
+                    joinedload(Post.hashtags),
+                    joinedload(Post.mentioned_users)
+                )
+            )
+            
+            result = await session.execute(posts_query)
+            posts_with_authors = result.unique().all()
+
+            # Fetch engagement data in bulk
+            engagement_data = await self._fetch_bulk_engagement(
+                session,
+                [post.id for post, _ in posts_with_authors]
+            )
+
+            # Create unified responses
+            post_responses = [
+                create_post_response(
+                    post=post,
+                    user=user,
+                    engagement_data=engagement_data.get(post.id),
+                    search_score=scores_by_id.get(post.id)
+                )
+                for post, user in posts_with_authors
+            ]
+
+            # Sort by search score and apply pagination
+            post_responses.sort(key=lambda x: x.score or 0, reverse=True)
+            paginated_posts = post_responses[offset:offset + limit]
+
+            return PostListResponse(
+                items=paginated_posts,
+                total=len(post_responses),
+                type="semantic",
+                has_more=len(paginated_posts) == limit
+            ).model_dump()
+
+        except Exception as e:
+            logger.error(f"Error in semantic search: {str(e)}")
+            raise
+
+    async def _fetch_bulk_engagement(
+        self,
+        session: AsyncSession,
+        post_ids: List[int]
+    ) -> Dict[int, Dict]:
+        """Fetch engagement data for multiple posts efficiently"""
+        try:
+            # This would integrate with your MongoDB service to fetch engagement data
+            logger.debug(f"Fetching engagement data for post_ids: {post_ids}")
+
+            engagement_data = await self.mongodb.post_engagements.find(
+                {"post_id": {"$in": post_ids}}
+            ).to_list(None)
+            
+            logger.debug(f"Raw engagement data from MongoDB: {engagement_data}")
+            
+            return {
+                item["post_id"]: {
+                    "likes": item.get("likes", []),
+                    "views": item.get("view_count", 0),
+                    "unique_viewers": len(item.get("viewers", [])),
+                    "engagement_score": item.get("engagement_score", 0.0),
+                    "is_liked": item.get("is_liked", False),
+                    "last_updated": item.get("last_updated")
                 }
-                for post in posts
-            ],
-            "total": len(results),
-            "type": "semantic"
-        }
+                for item in engagement_data
+            }
+        except Exception as e:
+            logger.error(f"Error fetching bulk engagement data: {e}")
+            return {}
+
 
     async def _text_search(
         self,
@@ -96,12 +181,16 @@ class SearchService:
         offset: int
     ) -> Dict:
         """Perform traditional text-based search"""
-        # Build base query
+        # Build base query with eager loading
         base_query = (
-            select(Post)
+            select(Post, User.username)
             .join(User, Post.author_id == User.id)
             .outerjoin(post_hashtags)
             .outerjoin(Hashtag)
+            .options(
+                joinedload(Post.hashtags),        # Eagerly load hashtags
+                joinedload(Post.mentioned_users)  # Eagerly load mentioned users
+            )
         )
 
         # Add text search conditions
@@ -123,10 +212,9 @@ class SearchService:
         if filters:
             base_query = self._apply_sql_filters(base_query, filters)
 
-        # Get total count
-        total = await session.scalar(
-            select(func.count()).select_from(base_query.subquery())
-        )
+        # Get total count with a subquery
+        count_query = select(func.count()).select_from(base_query.subquery())
+        total = await session.scalar(count_query)
 
         # Get paginated results
         results = await session.execute(
@@ -136,7 +224,9 @@ class SearchService:
             .limit(limit)
         )
 
-        posts = results.unique().scalars().all()
+        # Process results
+        results = results.unique().all()
+        posts_with_authors = [(post, username) for post, username in results]
 
         return {
             "items": [
@@ -144,10 +234,15 @@ class SearchService:
                     "post_id": post.id,
                     "content": post.content,
                     "author_id": post.author_id,
+                    "author_username": username,
                     "created_at": post.created_at,
-                    "hashtags": [tag.tag for tag in post.hashtags]
+                    "like_count": post.like_count or 0,
+                    "view_count": post.view_count or 0,
+                    "repost_count": post.repost_count or 0,
+                    "hashtags": [tag.tag for tag in post.hashtags] if post.hashtags else [],
+                    "mentioned_usernames": [user.username for user in post.mentioned_users] if post.mentioned_users else []
                 }
-                for post in posts
+                for post, username in posts_with_authors
             ],
             "total": total,
             "type": "text"
@@ -165,10 +260,19 @@ class SearchService:
         """Combine semantic and text search results"""
         # Perform both searches
         semantic_results = await self._semantic_search(
-            query, filters, min_score, limit, 0
+            session,  # Pass the session here
+            query, 
+            filters, 
+            min_score, 
+            limit, 
+            0
         )
         text_results = await self._text_search(
-            session, query, filters, limit, 0
+            session,
+            query,
+            filters,
+            limit,
+            0
         )
 
         # Combine and deduplicate results

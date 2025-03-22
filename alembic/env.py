@@ -56,7 +56,7 @@ def do_run_migrations(connection):
 
 async def run_async_migrations():
     configuration = config.get_section(config.config_ini_section)
-    configuration["sqlalchemy.url"] = "postgresql+asyncpg://postgres:postgres@db:5432/fastapi_auth"
+    configuration["sqlalchemy.url"] = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/fastapi_auth"
     
     connectable = async_engine_from_config(
         configuration,

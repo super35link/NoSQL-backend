@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
-from app.auth.dependencies import current_active_user
+from app.auth.users import current_active_user
 from app.db.base import get_async_session
 from app.db.models import User, ThreadStatus
 from app.posts.services.thread_service import ThreadService

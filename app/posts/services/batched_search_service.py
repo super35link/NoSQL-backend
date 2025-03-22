@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class BatchSearchService:
     def __init__(
         self, 
-        batch_size: int = 32, 
+        batch_size: int = 16, 
         batch_wait_seconds: float = 2.0,
         embedding_cache_ttl: int = 3600 * 24  # 24 hours for embeddings
     ):

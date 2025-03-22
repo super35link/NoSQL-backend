@@ -1,12 +1,13 @@
+# app/auth/manager.py
 from typing import Optional
 from fastapi import Request
 from fastapi_users import BaseUserManager, IntegerIDMixin
-from app.core.config import settings
 from app.db.models import User
+from app.core.config import settings
 
 class UserManager(IntegerIDMixin, BaseUserManager[User, int]):
-    reset_password_token_secret = settings.SECRET_KEY
-    verification_token_secret = settings.SECRET_KEY
+    reset_password_token_secret = settings.RESET_PASSWORD_TOKEN_SECRET
+    verification_token_secret = settings.VERIFICATION_TOKEN_SECRET
 
     async def on_after_register(self, user: User, request: Optional[Request] = None):
         print(f"User {user.id} has registered.")

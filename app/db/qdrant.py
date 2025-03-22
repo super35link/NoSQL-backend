@@ -1,17 +1,14 @@
-# app/db/qdrant.py
 import hashlib
 import json
 import logging
 from typing import Dict, List, Optional
-from fastapi import logger
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from app.core.config import settings
-from app.db.redis import RedisManager
+from app.db.redis import redis_manager  # Use global instance instead of creating new one
 
 logger = logging.getLogger(__name__)
-
 
 class QdrantManager:
     def __init__(self):
@@ -20,63 +17,133 @@ class QdrantManager:
             port=settings.QDRANT_PORT
         )
         self.collection_name = "post_embeddings"
-        self.redis_manager = RedisManager()
+        self.redis_manager = redis_manager  # Use the existing instance
 
     async def init_collection(self):
-        """Initialize the posts collection"""
+        """Initialize collection if it doesn't exist"""
         try:
-            self.client.recreate_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(
-                    size=384,  # Using MiniLM embedding size
-                    distance=Distance.COSINE
+            # Convert synchronous operations to async pattern with proper error handling
+            collections = self.client.get_collections()
+            collection_exists = self.collection_name in [c.name for c in collections.collections]
+            
+            if not collection_exists:
+                logger.info(f"Creating new collection: {self.collection_name}")
+                self.client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(
+                        size=384,
+                        distance=Distance.COSINE
+                    )
                 )
-            )
-
-            # Create payload index for filtering
-            self.client.create_payload_index(
-                collection_name=self.collection_name,
-                field_name="post_id",
-                field_schema="keyword"
-            )
-
-            self.client.create_payload_index(
-                collection_name=self.collection_name,
-                field_name="author_id",
-                field_schema="keyword"
-            )
-
-            self.client.create_payload_index(
-                collection_name=self.collection_name,
-                field_name="created_at",
-                field_schema="datetime"
-            )
+                self._create_indices()
+                await self.optimize_storage()  # Configure optimizers after creation
+            else:
+                logger.info(f"Collection {self.collection_name} already exists")
 
         except Exception as e:
-            print(f"Error initializing Qdrant collection: {e}")
-            raise
+            logger.error(f"Error initializing Qdrant collection: {e}")
+            # Don't raise exception to prevent transaction rollback
+
+    def _create_indices(self):
+        """Create payload indices"""
+        try:
+            indices = [
+                ("post_id", "keyword"),
+                ("author_id", "keyword"),
+                ("created_at", "datetime"),
+                ("hashtags", "keyword")
+            ]
+            
+            for field_name, field_schema in indices:
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field_name,
+                    field_schema=field_schema
+                )
+        except Exception as e:
+            logger.error(f"Error creating indices: {e}")
+            # Don't raise exception
 
     async def upsert_post_embedding(self, post_id: int, embedding: list, metadata: dict):
         """Store or update post embedding"""
         try:
+            # Clean up metadata to ensure it's serializable
+            clean_metadata = {
+                "post_id": post_id,
+                "author_id": metadata.get("author_id"),
+                "created_at": metadata.get("created_at"),
+                "hashtags": metadata.get("hashtags", [])
+            }
+            
             point = PointStruct(
                 id=post_id,
                 vector=embedding,
-                payload={
-                    "post_id": post_id,
-                    "author_id": metadata.get("author_id"),
-                    "created_at": metadata.get("created_at"),
-                    "hashtags": metadata.get("hashtags", [])
-                }
+                payload=clean_metadata
             )
             
+            # Use wait=True to ensure the operation completes
             self.client.upsert(
                 collection_name=self.collection_name,
-                points=[point]
+                points=[point],
+                wait=True
             )
+            
+            logger.info(f"Successfully upserted embedding for post {post_id}")
+            return True
         except Exception as e:
-            print(f"Error upserting post embedding: {e}")
-            raise
+            logger.error(f"Error upserting post embedding: {e}")
+            # Log error but don't raise to prevent transaction rollback
+            return False
+
+    async def update_payload(self, post_id: int, metadata: Dict):
+        """Update post metadata without changing embedding"""
+        try:
+            self.client.update_payload(
+                collection_name=self.collection_name,
+                payload=metadata,
+                points=[post_id],
+                wait=True
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error updating payload: {e}")
+            # Log error but don't raise
+            return False
+
+    async def delete_post_embedding(self, post_id: int):
+        """Delete post embedding when post is deleted"""
+        try:
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.PointIdsList(points=[post_id]),
+                wait=True
+            )
+            logger.info(f"Deleted embedding for post {post_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting post embedding: {e}")
+            # Log error but don't raise
+            return False
+
+    async def optimize_storage(self):
+        """Optimize storage and clean WAL"""
+        try:
+            self.client.update_collection(
+                collection_name=self.collection_name,
+                optimizer_config=models.OptimizersConfigDiff(
+                    default_segment_number=2,
+                    max_segment_size=100_000,
+                    memmap_threshold=10_000,
+                    vacuum_min_vector_number=1000,
+                    flush_interval_sec=60
+                )
+            )
+            logger.info("Storage optimization completed")
+            return True
+        except Exception as e:
+            logger.error(f"Error optimizing storage: {e}")
+            # Log error but don't raise
+            return False
 
     async def search_similar_posts(
         self,
@@ -86,12 +153,8 @@ class QdrantManager:
         offset: int = 0,
         filter_conditions: Optional[Dict] = None
     ) -> List[Dict]:
-        """
-        Search for similar posts using vector similarity
-        with Redis caching
-        """
+        """Search for similar posts using vector similarity with Redis caching"""
         try:
-            # Generate cache key
             cache_key = self._generate_search_cache_key(
                 query_vector, 
                 limit, 
@@ -100,18 +163,13 @@ class QdrantManager:
                 filter_conditions
             )
             
-            # Try to get from cache
             cached_results = await self.redis_manager.get_post(cache_key)
             if cached_results:
                 logger.info(f"Cache hit for search query {cache_key}")
                 return cached_results
 
-            # Convert filter conditions to Qdrant filter format if provided
-            search_filter = None
-            if filter_conditions:
-                search_filter = self._prepare_search_filter(filter_conditions)
+            search_filter = self._prepare_search_filter(filter_conditions) if filter_conditions else None
 
-            # Perform search in Qdrant
             search_results = self.client.search(
                 collection_name=self.collection_name,
                 query_vector=query_vector,
@@ -120,52 +178,27 @@ class QdrantManager:
                 score_threshold=score_threshold,
                 query_filter=search_filter
             )
-
-            # Process and format results
-            formatted_results = []
-            for result in search_results:
-                formatted_result = {
-                    "post_id": result.id,
-                    "score": result.score,
-                    "metadata": result.payload,
-                }
-                formatted_results.append(formatted_result)
-
-            # Cache results with 5-minute TTL
-            await self.redis_manager.set_post(cache_key, formatted_results, ttl=300)
             
+            logger.debug(f"Raw search results: {search_results}")
+
+            formatted_results = [{
+                "post_id": result.id,
+                "score": result.score,
+                "metadata": result.payload,
+            } for result in search_results]
+
+            try:
+                await self.redis_manager.set_post(cache_key, formatted_results)
+            except Exception as cache_e:
+                logger.error(f"Error caching search results: {cache_e}")
+                # Continue even if caching fails
+                
             return formatted_results
 
         except Exception as e:
             logger.error(f"Error in search_similar_posts: {e}")
-            raise
-
-    def _generate_search_cache_key(
-        self,
-        query_vector: List[float],
-        limit: int,
-        score_threshold: float,
-        offset: int,
-        filter_conditions: Optional[Dict]
-    ) -> str:
-        """Generate a deterministic cache key for search parameters"""
-        # Create a hash of the query vector (it could be large)
-        vector_hash = hashlib.md5(str(query_vector).encode()).hexdigest()
-        
-        # Combine all search parameters
-        params = {
-            "vector_hash": vector_hash,
-            "limit": limit,
-            "score_threshold": score_threshold,
-            "offset": offset,
-            "filters": filter_conditions
-        }
-        
-        # Create a deterministic string representation
-        params_str = json.dumps(params, sort_keys=True)
-        params_hash = hashlib.md5(params_str.encode()).hexdigest()
-        
-        return f"search_results:{params_hash}"
+            # Return empty results rather than raising exception
+            return []
 
     def _prepare_search_filter(self, conditions: Dict) -> Dict:
         """Convert API filter conditions to Qdrant filter format"""
@@ -196,6 +229,30 @@ class QdrantManager:
             })
             
         return qdrant_filter if qdrant_filter["must"] else None
+
+    def _generate_search_cache_key(
+        self,
+        query_vector: List[float],
+        limit: int,
+        score_threshold: float,
+        offset: int,
+        filter_conditions: Optional[Dict]
+    ) -> str:
+        """Generate a deterministic cache key for search parameters"""
+        vector_hash = hashlib.md5(str(query_vector).encode()).hexdigest()
+        
+        params = {
+            "vector_hash": vector_hash,
+            "limit": limit,
+            "score_threshold": score_threshold,
+            "offset": offset,
+            "filters": filter_conditions
+        }
+        
+        params_str = json.dumps(params, sort_keys=True)
+        params_hash = hashlib.md5(params_str.encode()).hexdigest()
+        
+        return f"search_results:{params_hash}"
 
     async def clear_search_cache(self, pattern: Optional[str] = None):
         """Clear search results cache"""

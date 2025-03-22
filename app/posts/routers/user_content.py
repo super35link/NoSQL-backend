@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
-from app.auth.dependencies import current_active_user
+from app.auth.users import current_active_user
 from app.db.base import get_async_session
 from app.db.models import User
 from app.posts.services.user_content_service import UserContentService

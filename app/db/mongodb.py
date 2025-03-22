@@ -1,6 +1,5 @@
 # app/db/mongodb.py
 import logging
-from fastapi import logger
 from motor.motor_asyncio import AsyncIOMotorClient
 from functools import lru_cache
 from app.core.config import settings
@@ -80,6 +79,49 @@ async def create_mongodb_indexes():
         await db.content_moderation.create_index(
             [("timestamp", -1)],
             name="moderation_timeline"
+        )
+        # Create hashtag_follows collection with indexes
+        await db.hashtag_follows.create_index(
+            [("user_id", 1), ("hashtag", 1)], 
+            unique=True,
+            name="user_hashtag_index"
+        )
+        await db.hashtag_follows.create_index(
+            [("user_id", 1)],
+            name="follows_by_user"
+        )
+        await db.hashtag_follows.create_index(
+            [("hashtag", 1)],
+            name="follows_by_hashtag"
+        )
+
+        # Create hashtag_stats collection with indexes
+        await db.hashtag_stats.create_index(
+            [("tag", 1)],
+            unique=True,
+            name="hashtag_stats_tag"
+        )
+        await db.hashtag_stats.create_index(
+            [("follower_count", -1)],
+            name="popular_hashtags"
+        )
+        await db.hashtag_stats.create_index(
+            [("category", 1), ("follower_count", -1)],
+            name="category_popular"
+        )
+
+        # Create trending_metrics collection with indexes
+        await db.trending_metrics.create_index(
+            [("timestamp", -1)],
+            name="trending_timeline"
+        )
+        await db.trending_metrics.create_index(
+            [("tag", 1), ("timestamp", -1)],
+            name="tag_timeline"
+        )
+        await db.trending_metrics.create_index(
+            [("type", 1), ("tag", 1), ("timestamp", -1)],
+            name="interaction_tag_timeline"
         )
         
         logger.info("MongoDB indexes created successfully")

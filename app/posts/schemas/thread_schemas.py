@@ -5,16 +5,16 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 class ThreadStatus(Enum):
-    ACTIVE = "active"
-    COMPLETE = "complete"
+    active = "active"
+    complete = "complete"
 
 class PostResponse(BaseModel):
     id: int
     content: str
     created_at: datetime
     author_username: str
-    thread_id: int
-    position_in_thread: int
+    thread_id: Optional[int] = None
+    position_in_thread: Optional[int] = None
 
     class Config:
         from_attributes = True

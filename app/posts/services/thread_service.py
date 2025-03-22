@@ -27,7 +27,7 @@ class ThreadService:
         thread = Thread(
             creator_id=user_id,
             created_at=datetime.utcnow(),
-            status=ThreadStatus.ACTIVE
+            status=ThreadStatus.active
 
         )
         session.add(thread)
@@ -72,7 +72,7 @@ class ThreadService:
         session: AsyncSession,
         user_id: int,
         thread_id: int,
-        post_content: str
+        post_content: PostCreate
     ) -> PostResponse:
         """Add new post to existing thread"""
         thread = await self._get_thread_with_creator(session, thread_id)
@@ -85,7 +85,7 @@ class ThreadService:
                 detail="Only thread creator can add to thread"
             )
 
-        if thread.status == ThreadStatus.COMPLETE:
+        if thread.status == ThreadStatus.complete:
             raise HTTPException(
                 status_code=400,
                 detail="Cannot add to completed thread"
@@ -94,7 +94,7 @@ class ThreadService:
         next_position = await self._get_next_position(session, thread_id)
         new_post = Post(
             author_id=user_id,
-            content=post_content,
+            content=post_content.content,
             thread_id=thread_id,
             position_in_thread=next_position
         )
@@ -137,20 +137,20 @@ class ThreadService:
                 detail="Only thread creator can complete thread"
             )
             
-        if thread.status == ThreadStatus.COMPLETE:
+        if thread.status == ThreadStatus.complete:
             raise HTTPException(
                 status_code=400,
                 detail="Thread is already completed"
             )
 
         try:
-            thread.status = ThreadStatus.COMPLETE
+            thread.status = ThreadStatus.complete
             thread.completed_at = datetime.utcnow()
             await session.commit()
             
             return {
                 "thread_id": thread_id,
-                "status": ThreadStatus.COMPLETE.value,
+                "status": ThreadStatus.complete.value,
                 "completed_at": thread.completed_at
             }
         except Exception as e:
@@ -178,20 +178,20 @@ class ThreadService:
                 detail="Only thread creator can reactivate thread"
             )
             
-        if thread.status == ThreadStatus.ACTIVE:
+        if thread.status == ThreadStatus.active:
             raise HTTPException(
                 status_code=400,
                 detail="Thread is already active"
             )
 
         try:
-            thread.status = ThreadStatus.ACTIVE
+            thread.status = ThreadStatus.active
             thread.completed_at = None
             await session.commit()
             
             return {
                 "thread_id": thread_id,
-                "status": ThreadStatus.ACTIVE.value,
+                "status": ThreadStatus.active.value,
                 "reactivated_at": datetime.utcnow()
             }
         except Exception as e:

@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import get_async_session
+from app.auth.users import current_active_user
+from app.db.models import User
 from app.posts.services.content_classification_service import ContentClassificationService
 
 router = APIRouter(prefix="/content", tags=["content"])
@@ -28,3 +30,12 @@ async def get_topic_distribution(
     session: AsyncSession = Depends(get_async_session)
 ):
     return await service.get_topic_distribution(session, topic)
+
+@router.post("/hashtags/{hashtag}/view")
+async def record_hashtag_view(
+    hashtag: str,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends (current_active_user)
+):
+    """Record a view for a hashtag"""
+    return await service.record_hashtag_view(session, hashtag, user.id)

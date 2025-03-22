@@ -1,7 +1,7 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.auth.dependencies import current_active_user
+from app.auth.users import current_active_user
 from app.db.base import get_async_session
 from app.db.models import User
 from . import service
@@ -23,7 +23,7 @@ async def follow_user(
         
     return await service.create_follow(db, user.id, FollowCreate(following_id=target_user.id))
 
-@router.delete("/{username}")
+@router.delete("/unfollow/{username}")
 async def unfollow_user(
     username: str,
     user: User = Depends(current_active_user),
