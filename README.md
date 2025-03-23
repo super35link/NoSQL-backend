@@ -7,9 +7,8 @@ A robust social media backend built with FastAPI, featuring a modern NoSQL-focus
 ## 🏗️ Architecture
 
 ### Databases
-- **MongoDB**: Primary database for core data, relationships, and document storage
+- **MongoDB**: Primary database for core data, relationships, document storage, and caching
 - **Qdrant**: Vector database for semantic search
-- **Redis**: Caching and real-time features
 
 ### Tech Stack
 - Python 3.10+
@@ -78,8 +77,7 @@ docker run -d --name mongodb -p 27017:27017 mongo
 # Qdrant
 docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
 
-# Redis
-docker run -d --name redis -p 6379:6379 redis
+
 ```
 
 5. **Configure environment variables**
@@ -105,10 +103,7 @@ class Settings:
     QDRANT_HOST: str = "localhost"
     QDRANT_PORT: int = 6333
     
-    # Redis
-    REDIS_HOST: str = "localhost"
-    REDIS_PORT: int = 6379
-    REDIS_DB: int = 0
+
 ```
 
 ## 🗄️ Project Structure
@@ -136,8 +131,7 @@ app/
 │   │   ├── base.py
 │   │   ├── models.py
 │   │   ├── mongodb.py
-│   │   ├── qdrant.py
-│   │   └── redis.py
+│   │   └── qdrant.py
 │   ├── follow/
 │   │   ├── __init__.py
 │   │   ├── models.py
@@ -225,10 +219,11 @@ pytest
 
 - Efficient NoSQL data modeling
 - Denormalization strategies for read-heavy operations
+- MongoDB caching capabilities
 - Batch processing for embeddings
 - Asynchronous operations
 - Connection pooling
-- Redis caching for hot data
+- Optimized document design for frequent queries
 
 ## 🛡️ Security
 
@@ -256,7 +251,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - MongoDB for flexible document storage
 - Sentence Transformers for embedding generation
 - Qdrant for vector similarity search
-- Redis for caching and real-time features
+- MongoDB for flexible document storage and caching
 
 ## 📞 Contact
 
