@@ -1,18 +1,19 @@
 # FastAPI Social Media Backend
 
-A robust social media backend built with FastAPI, featuring a multi-database architecture for optimal performance and scalability. The system supports advanced content management, semantic search, engagement tracking, and content classification.
+A robust social media backend built with FastAPI, featuring a modern NoSQL-focused architecture for optimal performance and scalability. The system supports advanced content management, semantic search, engagement tracking, and content classification.
+
+> **Note: We are currently in the process of transitioning to a fully NoSQL approach. Some parts of the codebase are under construction as we migrate from our previous hybrid database architecture.**
 
 ## 🏗️ Architecture
 
 ### Databases
-- **PostgreSQL**: Core data and relationships
-- **MongoDB**: Engagement tracking and metrics
+- **MongoDB**: Primary database for core data, relationships, and document storage
 - **Qdrant**: Vector database for semantic search
+- **Redis**: Caching and real-time features
 
 ### Tech Stack
 - Python 3.10+
 - FastAPI
-- SQLAlchemy
 - Motor (MongoDB async driver)
 - Sentence Transformers
 - Pydantic
@@ -51,37 +52,37 @@ A robust social media backend built with FastAPI, featuring a multi-database arc
 
 ## 🛠️ Installation
 
-1. Clone the repository
+1. **Clone the repository**
 ```bash
 git clone https://github.com/yourusername/fastapi-social-backend.git
 cd fastapi-social-backend
 ```
 
-2. Create and activate virtual environment
+2. **Create and activate virtual environment**
 ```bash
 python -m venv venv
 source venv/bin/activate  # Unix
 venv\Scripts\activate     # Windows
 ```
 
-3. Install dependencies
+3. **Install dependencies**
 ```bash
 pip install -r requirements.txt
 ```
 
-4. Set up databases
+4. **Set up databases**
 ```bash
-# PostgreSQL
-docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=password postgres
-
 # MongoDB
 docker run -d --name mongodb -p 27017:27017 mongo
 
 # Qdrant
 docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
+
+# Redis
+docker run -d --name redis -p 6379:6379 redis
 ```
 
-5. Configure environment variables
+5. **Configure environment variables**
 ```bash
 cp .env.example .env
 # Edit .env with your configuration
@@ -96,12 +97,6 @@ class Settings:
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
     
-    # PostgreSQL
-    POSTGRES_SERVER: str = "localhost"
-    POSTGRES_USER: str = "postgres"
-    POSTGRES_PASSWORD: str = "password"
-    POSTGRES_DB: str = "social_media"
-    
     # MongoDB
     MONGODB_URL: str = "mongodb://localhost:27017"
     MONGODB_DB_NAME: str = "social_media"
@@ -109,6 +104,11 @@ class Settings:
     # Qdrant
     QDRANT_HOST: str = "localhost"
     QDRANT_PORT: int = 6333
+    
+    # Redis
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
 ```
 
 ## 🗄️ Project Structure
@@ -121,15 +121,13 @@ app/
 │   ├── __init__.py
 │   ├── main.py
 │   ├── api/
-│   │   └── v1/
-│   │       ├── __init__.py
-│   │       └── endpoints/
+│   │   └── endpoints/
 │   ├── auth/
 │   │   ├── __init__.py
 │   │   ├── dependencies.py
 │   │   ├── router.py
 │   │   ├── schemas.py
-│   │   └── service.py
+│   │   └── auth.py
 │   ├── core/
 │   │   ├── __init__.py
 │   │   └── config.py
@@ -138,7 +136,8 @@ app/
 │   │   ├── base.py
 │   │   ├── models.py
 │   │   ├── mongodb.py
-│   │   └── qdrant.py
+│   │   ├── qdrant.py
+│   │   └── redis.py
 │   ├── follow/
 │   │   ├── __init__.py
 │   │   ├── models.py
@@ -147,17 +146,28 @@ app/
 │   │   └── service.py
 │   ├── posts/
 │   │   ├── __init__.py
-│   │   ├── core_post_service.py
-│   │   ├── thread_service.py
-│   │   ├── user_content_service.py
-│   │   ├── content_classification_service.py
-│   │   ├── comprehensive_search_service.py
-│   │   ├── batched_search_service.py
-│   │   ├── embedding_service.py
-│   │   ├── engagement_service.py
-│   │   ├── router.py
-│   │   ├── schemas.py
-│   │   └── service.py
+│   │   ├── routers/
+│   │   │   ├── core.py
+│   │   │   ├── threads.py
+│   │   │   ├── search.py
+│   │   │   ├── classification.py
+│   │   │   ├── user_content.py
+│   │   │   ├── engagement.py
+│   │   │   └── hashtag.py
+│   │   ├── schemas/
+│   │   │   ├── thread_schemas.py
+│   │   │   ├── search_schemas.py
+│   │   │   └── post_response.py
+│   │   ├── services/
+│   │   │   ├── core_post_service.py
+│   │   │   ├── thread_service.py
+│   │   │   ├── comprehensive_search_service.py
+│   │   │   ├── batched_search_service.py
+│   │   │   ├── embedding_service.py
+│   │   │   ├── engagement_service.py
+│   │   │   ├── content_classification_service.py
+│   │   │   └── hashtag_service.py
+│   │   └── router.py
 │   ├── profile/
 │   │   ├── __init__.py
 │   │   ├── models.py
@@ -170,6 +180,8 @@ app/
 │       ├── router.py
 │       ├── schemas.py
 │       └── service.py
+├── ml/
+│   └── ...
 ├── tests/
 │   └── __init__.py
 ├── .env.example
@@ -181,55 +193,49 @@ app/
 ## 🚦 API Endpoints
 
 ### Posts
-```
-POST   /api/posts/              Create post
-GET    /api/posts/{post_id}     Get post
-PUT    /api/posts/{post_id}     Update post
-DELETE /api/posts/{post_id}     Delete post
-GET    /api/posts/              List posts
-```
+- `POST   /api/posts/`              Create post
+- `GET    /api/posts/{post_id}`     Get post
+- `PUT    /api/posts/{post_id}`     Update post
+- `DELETE /api/posts/{post_id}`     Delete post
+- `GET    /api/posts/`              List posts
 
 ### Threads
-```
-POST   /api/threads/            Create thread
-GET    /api/threads/{id}        Get thread
-PUT    /api/threads/{id}        Update thread
-POST   /api/threads/{id}/posts  Add to thread
-```
+- `POST   /api/threads/`            Create thread
+- `GET    /api/threads/{id}`        Get thread
+- `PUT    /api/threads/{id}`        Update thread
+- `POST   /api/threads/{id}/posts`  Add to thread
 
 ### Search
-```
-GET    /api/search/posts        Search posts
-GET    /api/search/suggest      Get suggestions
-```
+- `GET    /api/search/posts`        Search posts
+- `GET    /api/search/suggest`      Get suggestions
 
 ### Engagement
-```
-POST   /api/posts/{id}/like     Toggle like
-GET    /api/posts/{id}/stats    Get engagement stats
-```
+- `POST   /api/posts/{id}/like`     Toggle like
+- `GET    /api/posts/{id}/stats`    Get engagement stats
 
 ## 🧪 Testing
 
 Run tests using pytest:
+
 ```bash
 pytest
 ```
 
 ## 📈 Performance Considerations
 
-- Efficient database queries through proper indexing
+- Efficient NoSQL data modeling
+- Denormalization strategies for read-heavy operations
 - Batch processing for embeddings
 - Asynchronous operations
 - Connection pooling
-- Query optimization
+- Redis caching for hot data
 
 ## 🛡️ Security
 
 - Authentication required for protected endpoints
 - Input validation
 - Rate limiting preparation
-- SQL injection prevention
+- NoSQL injection prevention
 - XSS protection
 
 ## 🔄 Contributing
@@ -242,15 +248,15 @@ pytest
 
 ## 📝 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ## 🤝 Acknowledgments
 
 - FastAPI for the amazing framework
+- MongoDB for flexible document storage
 - Sentence Transformers for embedding generation
 - Qdrant for vector similarity search
-- MongoDB for engagement tracking
-- PostgreSQL for reliable data storage
+- Redis for caching and real-time features
 
 ## 📞 Contact
 
