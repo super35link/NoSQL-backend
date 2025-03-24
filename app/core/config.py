@@ -40,9 +40,8 @@ class Settings(BaseSettings):
 
     # Cache TTLs
     USER_CACHE_TTL: int = 3600
-    REDIS_POST_CACHE_TTL: int = 3600
-    REDIS_USER_CACHE_TTL: int = 3600
-    REDIS_RATE_LIMIT_TTL: int = 3600
+    POST_CACHE_TTL: int = 3600
+    RATE_LIMIT_TTL: int = 3600
 
     # Qdrant
     QDRANT_HOST: str = "qdrant"

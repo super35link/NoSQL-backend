@@ -1,7 +1,7 @@
 # New MongoDB-based caching manager (replaces RedisManager)
 import asyncio
 from datetime import datetime
-from app import settings
+from app.core.config import settings
 from motor.motor_asyncio import AsyncIOMotorClient
 
 
@@ -17,7 +17,7 @@ class MongoDBCacheManager:
     def __init__(self):
         # Connect to MongoDB with in-memory storage engine for cache collection
         self.client = AsyncIOMotorClient(settings.MONGODB_URL)
-        self.db = self.client[settings.MONGODB_DB]
+        self.db = self.client[settings.MONGODB_DB_NAME]
         
         # Create cache collections with TTL indexes
         self.post_cache = self.db["post_cache"]
