@@ -27,7 +27,7 @@ class MongoDBCacheManager:
         
         # Setup TTL indexes for automatic expiration
         asyncio.create_task(self._setup_indexes())
-    
+     
     async def _setup_indexes(self):
         # Create TTL indexes for cache collections
         await self.post_cache.create_index("created_at", expireAfterSeconds=settings.POST_CACHE_TTL)

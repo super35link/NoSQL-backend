@@ -29,14 +29,7 @@ class Settings(BaseSettings):
     VERIFY_EMAIL: bool = True
     RESET_PASSWORD: bool = True
 
-    # Redis Configuration
-    REDIS_URL: str = "redis://localhost:6379"
-    REDIS_PASSWORD: Optional[str] = None
-    REDIS_DB: int = 0
-    REDIS_MAX_CONNECTIONS: int = 10
-    REDIS_SENTINEL_ENABLED: bool = False
-    REDIS_SENTINEL_MASTER: Optional[str] = None
-    REDIS_SENTINEL_NODES: Optional[str] = None
+
 
     # Cache TTLs
     USER_CACHE_TTL: int = 3600

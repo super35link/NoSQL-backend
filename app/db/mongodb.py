@@ -21,7 +21,7 @@ async def create_mongodb_indexes():
     db = get_mongodb()
     try:
         # Post Engagements Collection Indexes
-        await db.post_engagements.create_index(
+        await db.post_engagements.create_index( 
             [("post_id", 1)], 
             unique=True,
             name="post_engagement_lookup"

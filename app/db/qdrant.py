@@ -6,7 +6,6 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from app.core.config import settings
-from app.db.redis import redis_manager  # Use global instance instead of creating new one
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +16,6 @@ class QdrantManager:
             port=settings.QDRANT_PORT
         )
         self.collection_name = "post_embeddings"
-        self.redis_manager = redis_manager  # Use the existing instance
 
     async def init_collection(self):
         """Initialize collection if it doesn't exist"""
@@ -153,9 +151,8 @@ class QdrantManager:
         offset: int = 0,
         filter_conditions: Optional[Dict] = None
     ) -> List[Dict]:
-        """Search for similar posts using vector similarity with Redis caching"""
         try:
-            cache_key = self._generate_search_cache_key(
+            self._generate_search_cache_key(
                 query_vector, 
                 limit, 
                 score_threshold,
@@ -163,10 +160,6 @@ class QdrantManager:
                 filter_conditions
             )
             
-            cached_results = await self.redis_manager.get_post(cache_key)
-            if cached_results:
-                logger.info(f"Cache hit for search query {cache_key}")
-                return cached_results
 
             search_filter = self._prepare_search_filter(filter_conditions) if filter_conditions else None
 
@@ -187,11 +180,6 @@ class QdrantManager:
                 "metadata": result.payload,
             } for result in search_results]
 
-            try:
-                await self.redis_manager.set_post(cache_key, formatted_results)
-            except Exception as cache_e:
-                logger.error(f"Error caching search results: {cache_e}")
-                # Continue even if caching fails
                 
             return formatted_results
 
@@ -253,12 +241,3 @@ class QdrantManager:
         params_hash = hashlib.md5(params_str.encode()).hexdigest()
         
         return f"search_results:{params_hash}"
-
-    async def clear_search_cache(self, pattern: Optional[str] = None):
-        """Clear search results cache"""
-        try:
-            pattern = pattern or "search_results:*"
-            await self.redis_manager.clear_pattern(pattern)
-            logger.info("Cleared search cache with pattern: %s", str(pattern))
-        except Exception as e:
-            logger.error("Error clearing search cache: %s", str(e))

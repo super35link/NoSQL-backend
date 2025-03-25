@@ -10,7 +10,12 @@ services:
       - "5432:5432"
     volumes:
       - fastapi-auth-db-data:/var/lib/postgresql/data
-
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  
   mongodb:
     image: mongo:latest
     container_name: fastapi-mongo-db
@@ -18,7 +23,13 @@ services:
       - "27017:27017"
     volumes:
       - fastapi-mongo-db-data:/data/db
-
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+  
   qdrant:
     image: qdrant/qdrant:latest
     container_name: fastapi-qdrant
@@ -28,31 +39,26 @@ services:
     volumes:
       - fastapi-qdrant-data:/qdrant/storage
   
-  redis:
-    image: redis:latest
-    container_name: fastapi-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - fastapi-redis-data:/data
-
   web:
     build: .
     container_name: fastapi-auth-app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # The command is now handled by the entrypoint script in the Dockerfile
     volumes:
       - .:/app
       - ml_models:/root/.cache/huggingface 
     ports:
       - "8000:8000"
     depends_on:
-      - db
-      - mongodb
-      - qdrant
-      - redis
+      db:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/fastapi_auth
       - MONGODB_URL=mongodb://mongodb:27017
+      - MONGODB_DB_NAME=social_media
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
       - SECRET_KEY=your-secret-key-here
@@ -64,10 +70,6 @@ services:
       - MAIL_SERVER=localhost
       - MAIL_STARTTLS=false
       - MAIL_SSL_TLS=false
-      - REDIS_URL=redis://redis:6379
-      - REDIS_MAX_CONNECTIONS=10
-      - REDIS_POST_CACHE_TTL=3600
-      - REDIS_USER_CACHE_TTL=3600
 
 volumes:
   fastapi-auth-db-data:
@@ -76,6 +78,4 @@ volumes:
     name: fastapi-mongo-db-data
   fastapi-qdrant-data:
     name: fastapi-qdrant-data
-  fastapi-redis-data:
-    name: fastapi-redis-data
   ml_models:

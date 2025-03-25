@@ -1,34 +1,51 @@
-# Use an official Python runtime as a parent image
-FROM python:3.11-slim
+FROM python:3.10-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-ENV PYTHONPATH /app
-
-# Set the working directory in the container
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libpq-dev \
+RUN apt-get update && apt-get install -y \
     build-essential \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first to leverage Docker cache
+# Copy requirements file
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cpu && \
-    pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies in smaller batches with increased timeout
+# First batch: Basic dependencies
+RUN pip install --no-cache-dir --timeout 100 \
+    fastapi \
+    uvicorn \
+    pydantic-settings \
+    PyYAML \
+    pytest
 
-# Copy the project
+# Second batch: Database dependencies
+RUN pip install --no-cache-dir --timeout 100 \
+    sqlalchemy \
+    asyncpg \
+    psycopg2-binary \
+    alembic \
+    fastapi-users \
+    fastapi-users-db-sqlalchemy
+
+# Third batch: MongoDB dependencies
+RUN pip install --no-cache-dir --timeout 100 \
+    motor \
+    pymongo
+
+# Fourth batch: Qdrant dependencies
+RUN pip install --no-cache-dir --timeout 100 \
+    qdrant-client
+
+# Install PyTorch using the official method instead of pip
+RUN pip install --no-cache-dir --timeout 100 \
+    sentence-transformers==3.3.1 \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    torch==2.5.0
+
+# Copy the application code
 COPY . .
 
-# Make port 8000 available
-EXPOSE 8000
-
-# Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default command
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
