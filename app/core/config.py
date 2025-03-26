@@ -56,12 +56,25 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
         "http://127.0.0.1:8000",
     ]
-
-    # Apple Sign In (all optional since not in use yet)
-    APPLE_CLIENT_ID: Optional[str] = None
-    APPLE_TEAM_ID: Optional[str] = None
-    APPLE_KEY_ID: Optional[str] = None
-    APPLE_PRIVATE_KEY_PATH: Optional[str] = None
+    # Model Management Settings
+    ENABLE_MODEL_MANAGEMENT: bool = True
+    MODEL_CHECK_INTERVAL_SECONDS: int = 600  # 10 minutes
+    MODEL_IDLE_THRESHOLD_SECONDS: int = 3600  # 1 hour
+    
+    # MongoDB Settings
+    MONGODB_URL: str = "mongodb://localhost:27017"
+    MONGODB_DB_NAME: str = "social_media"
+    MONGODB_POOL_SIZE: int = 10
+    MONGODB_MAX_IDLE_TIME_MS: int = 60000  # 1 minute
+    
+    # Logging Configuration
+    LOG_LEVEL: str = "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+    LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    
+    # API Configuration
+    MAX_PAGE_SIZE: int = 100
+    DEFAULT_PAGE_SIZE: int = 20
+    
 
     class Config:
         env_file = ".env"

@@ -1,17 +1,18 @@
-"""
-MongoDB implementation of the core post service.
-Replaces the PostgreSQL-dependent implementation with MongoDB.
-"""
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union, TypeVar
 from datetime import datetime
 from bson import ObjectId
 from fastapi import HTTPException, status
 import logging
+from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorCollection
+
 
 from app.db.mongodb import get_mongodb
 from app.posts.schemas.post_document import PostDocument, PostEngagementDocument, PostInteractionDocument, PostClassificationDocument
 
 logger = logging.getLogger(__name__)
+
+# Type variables for better type annotations
+T = TypeVar('T', bound=Dict[str, Any])
 
 class NoSQLCorePostService:
     """
@@ -21,25 +22,37 @@ class NoSQLCorePostService:
     """
     
     def __init__(self):
-        self.db = None
-        self.posts_collection = None
-        self.engagements_collection = None
-        self.interactions_collection = None
-        self.classifications_collection = None
+        self.db: Optional[AsyncIOMotorDatabase] = None
+        self.posts_collection: Optional[AsyncIOMotorCollection] = None
+        self.engagements_collection: Optional[AsyncIOMotorCollection] = None
+        self.interactions_collection: Optional[AsyncIOMotorCollection] = None
+        self.classifications_collection: Optional[AsyncIOMotorCollection] = None
     
-    async def initialize(self):
+    async def initialize(self) -> None:
         """Initialize MongoDB collections."""
         self.db = await get_mongodb()
-        self.posts_collection = self.db.posts
-        self.engagements_collection = self.db.post_engagements
-        self.interactions_collection = self.db.post_interactions
-        self.classifications_collection = self.db.post_classifications
+        
+        # Explicitly type the collections using annotations
+        # This tells the type checker these are AsyncIOMotorCollection objects
+        self.posts_collection = self.db["posts"]  # type: AsyncIOMotorCollection
+        self.engagements_collection = self.db["post_engagements"]  # type: AsyncIOMotorCollection
+        self.interactions_collection = self.db["post_interactions"]  # type: AsyncIOMotorCollection
+        self.classifications_collection = self.db["post_classifications"]  # type: AsyncIOMotorCollection
         
         # Ensure indexes are created
         await self._ensure_indexes()
     
-    async def _ensure_indexes(self):
+    async def _ensure_db(self) -> None:
+        """Ensure database connection is initialized."""
+        if not self.db:
+            await self.initialize()
+    
+    async def _ensure_indexes(self) -> None:
         """Ensure all necessary indexes are created."""
+        if not self.posts_collection:
+            await self._ensure_db()
+            return
+            
         # Posts collection indexes
         await self.posts_collection.create_index("author_id")
         await self.posts_collection.create_index("created_at")
@@ -62,6 +75,8 @@ class NoSQLCorePostService:
         Create a new post in MongoDB.
         Returns the string representation of the ObjectId.
         """
+        await self._ensure_db()
+        
         now = datetime.utcnow()
         
         # Convert reply_to_id to ObjectId if provided
@@ -96,7 +111,7 @@ class NoSQLCorePostService:
         }
         
         # Insert post document
-        result = await self.posts_collection.insert_one(post_doc)
+        result = await self.posts_collection.insert_one(post_doc)  # type: ignore
         post_id = str(result.inserted_id)
         
         # Initialize engagement document
@@ -112,7 +127,7 @@ class NoSQLCorePostService:
         }
         
         # Insert engagement document
-        await self.engagements_collection.insert_one(engagement_doc)
+        await self.engagements_collection.insert_one(engagement_doc)  # type: ignore
         
         return post_id
     
@@ -121,13 +136,15 @@ class NoSQLCorePostService:
         Get a post by its ID.
         Converts ObjectId to string in the returned document.
         """
+        await self._ensure_db()
+        
         try:
             post_id_obj = ObjectId(post_id)
         except Exception as e:
             logger.error(f"Invalid post_id format: {e}")
             return None
         
-        post = await self.posts_collection.find_one({"_id": post_id_obj})
+        post = await self.posts_collection.find_one({"_id": post_id_obj})  # type: ignore
         
         if post:
             # Convert ObjectId to string for JSON serialization
@@ -136,7 +153,7 @@ class NoSQLCorePostService:
                 post["reply_to_id"] = str(post["reply_to_id"])
             
             # Get engagement metrics
-            engagement = await self.engagements_collection.find_one({"post_id": post_id_obj})
+            engagement = await self.engagements_collection.find_one({"post_id": post_id_obj})  # type: ignore
             if engagement:
                 post["engagement"] = {
                     "likes_count": engagement.get("likes_count", 0),
@@ -159,6 +176,8 @@ class NoSQLCorePostService:
         Update a post by its ID.
         Returns True if successful, False otherwise.
         """
+        await self._ensure_db()
+        
         try:
             post_id_obj = ObjectId(post_id)
         except Exception as e:
@@ -184,7 +203,7 @@ class NoSQLCorePostService:
             update_doc["metadata"] = metadata
         
         # Update post
-        result = await self.posts_collection.update_one(
+        result = await self.posts_collection.update_one(  # type: ignore
             {"_id": post_id_obj, "is_deleted": False},
             {"$set": update_doc}
         )
@@ -196,6 +215,8 @@ class NoSQLCorePostService:
         Soft delete a post by its ID.
         Returns True if successful, False otherwise.
         """
+        await self._ensure_db()
+        
         try:
             post_id_obj = ObjectId(post_id)
         except Exception as e:
@@ -203,7 +224,7 @@ class NoSQLCorePostService:
             return False
         
         # Soft delete post
-        result = await self.posts_collection.update_one(
+        result = await self.posts_collection.update_one(  # type: ignore
             {"_id": post_id_obj},
             {"$set": {"is_deleted": True, "updated_at": datetime.utcnow()}}
         )
@@ -218,7 +239,9 @@ class NoSQLCorePostService:
         Get posts by author ID with pagination.
         Returns a list of posts with ObjectId converted to string.
         """
-        cursor = self.posts_collection.find(
+        await self._ensure_db()
+        
+        cursor = self.posts_collection.find(  # type: ignore
             {"author_id": author_id, "is_deleted": False, "is_hidden": False}
         ).sort("created_at", -1).skip(skip).limit(limit)
         
@@ -233,20 +256,22 @@ class NoSQLCorePostService:
         return posts
     
     async def get_post_replies(self, 
-                              post_id: str, 
-                              skip: int = 0, 
-                              limit: int = 20) -> List[Dict[str, Any]]:
+        post_id: str, 
+        skip: int = 0, 
+        limit: int = 20) -> List[Dict[str, Any]]:
         """
         Get replies to a post with pagination.
         Returns a list of posts with ObjectId converted to string.
         """
+        await self._ensure_db()
+        
         try:
             post_id_obj = ObjectId(post_id)
         except Exception as e:
             logger.error(f"Invalid post_id format: {e}")
             return []
         
-        cursor = self.posts_collection.find(
+        cursor = self.posts_collection.find(  # type: ignore
             {"reply_to_id": post_id_obj, "is_deleted": False, "is_hidden": False}
         ).sort("created_at", -1).skip(skip).limit(limit)
         
@@ -268,6 +293,8 @@ class NoSQLCorePostService:
         Record a user interaction with a post.
         Returns True if successful, False otherwise.
         """
+        await self._ensure_db()
+        
         try:
             post_id_obj = ObjectId(post_id)
         except Exception as e:
@@ -275,7 +302,7 @@ class NoSQLCorePostService:
             return False
         
         # Check if post exists
-        post = await self.posts_collection.find_one({"_id": post_id_obj, "is_deleted": False})
+        post = await self.posts_collection.find_one({"_id": post_id_obj, "is_deleted": False})  # type: ignore
         if not post:
             return False
         
@@ -288,12 +315,12 @@ class NoSQLCorePostService:
             "metadata": metadata or {}
         }
         
-        await self.interactions_collection.insert_one(interaction_doc)
+        await self.interactions_collection.insert_one(interaction_doc)  # type: ignore
         
         # Update engagement metrics
         update_field = f"{interaction_type}_count"
         
-        await self.engagements_collection.update_one(
+        await self.engagements_collection.update_one(  # type: ignore
             {"post_id": post_id_obj},
             {
                 "$inc": {update_field: 1},
@@ -306,7 +333,7 @@ class NoSQLCorePostService:
         if interaction_type in ["like", "view", "repost"]:
             update_field = f"{interaction_type}s_count"  # likes_count, views_count, reposts_count
             
-            await self.posts_collection.update_one(
+            await self.posts_collection.update_one(  # type: ignore
                 {"_id": post_id_obj},
                 {"$inc": {update_field: 1}}
             )
@@ -314,14 +341,15 @@ class NoSQLCorePostService:
         return True
     
     async def search_posts(self, 
-                          query: str, 
-                          skip: int = 0, 
-                          limit: int = 20) -> List[Dict[str, Any]]:
-        """
-        Search posts by text content.
-        Returns a list of posts with ObjectId converted to string.
-        """
-        cursor = self.posts_collection.find(
+        query: str, 
+        skip: int = 0, 
+        limit: int = 20) -> List[Dict[str, Any]]:
+        
+        """ Search posts by text content. Returns a list of posts with ObjectId converted to string."""
+        
+        await self._ensure_db()
+        
+        cursor = self.posts_collection.find(  # type: ignore
             {
                 "$text": {"$search": query},
                 "is_deleted": False,
@@ -341,14 +369,14 @@ class NoSQLCorePostService:
         return posts
     
     async def get_posts_by_hashtag(self, 
-                                  hashtag: str, 
-                                  skip: int = 0, 
-                                  limit: int = 20) -> List[Dict[str, Any]]:
-        """
-        Get posts by hashtag with pagination.
-        Returns a list of posts with ObjectId converted to string.
-        """
-        cursor = self.posts_collection.find(
+        hashtag: str, 
+        skip: int = 0, 
+        limit: int = 20) -> List[Dict[str, Any]]:
+        
+        """ Get posts by hashtag with pagination. Returns a list of posts with ObjectId converted to string."""
+        await self._ensure_db()
+        
+        cursor = self.posts_collection.find(  # type: ignore
             {"hashtags": hashtag, "is_deleted": False, "is_hidden": False}
         ).sort("created_at", -1).skip(skip).limit(limit)
         
@@ -363,56 +391,60 @@ class NoSQLCorePostService:
         return posts
     
     async def add_post_classification(self, 
-                                     post_id: str, 
-                                     topics: List[Dict[str, Union[str, float]]],
-                                     sentiment: Optional[Dict[str, float]] = None) -> bool:
-        """
-        Add content classification to a post.
-        Returns True if successful, False otherwise.
-        """
-        try:
-            post_id_obj = ObjectId(post_id)
-        except Exception as e:
-            logger.error(f"Invalid post_id format: {e}")
-            return False
+            post_id: str, 
+            topics: List[Dict[str, Union[str, float]]],
+            sentiment: Optional[Dict[str, float]] = None) -> bool:
         
-        # Check if post exists
-        post = await self.posts_collection.find_one({"_id": post_id_obj})
-        if not post:
-            return False
+            """ Add content classification to a post. Returns True if successful, False otherwise."""
+            
+            await self._ensure_db()
+            
+            try:
+                post_id_obj = ObjectId(post_id)
+            except Exception as e:
+                logger.error(f"Invalid post_id format: {e}")
+                return False
+            
+            # Check if post exists
+            post = await self.posts_collection.find_one({"_id": post_id_obj})  # type: ignore
+            if not post:
+                return False
+            
+            now = datetime.utcnow()
+            
+            # Create classification document
+            classification_doc: PostClassificationDocument = {
+                "post_id": post_id_obj,
+                "topics": topics,
+                "sentiment": sentiment,
+                "created_at": now,
+                "updated_at": None
+            }
+            
+            # Insert or update classification
+            await self.classifications_collection.update_one(  # type: ignore
+                {"post_id": post_id_obj},
+                {"$set": classification_doc},
+                upsert=True
+            )
+            
+            return True
         
-        now = datetime.utcnow()
-        
-        # Create classification document
-        classification_doc: PostClassificationDocument = {
-            "post_id": post_id_obj,
-            "topics": topics,
-            "sentiment": sentiment,
-            "created_at": now,
-            "updated_at": None
-        }
-        
-        # Insert or update classification
-        await self.classifications_collection.update_one(
-            {"post_id": post_id_obj},
-            {"$set": classification_doc},
-            upsert=True
-        )
-        
-        return True
-    
+
     async def get_post_classification(self, post_id: str) -> Optional[Dict[str, Any]]:
         """
         Get content classification for a post.
         Returns classification data with ObjectId converted to string.
         """
+        await self._ensure_db()
+        
         try:
             post_id_obj = ObjectId(post_id)
         except Exception as e:
             logger.error(f"Invalid post_id format: {e}")
             return None
         
-        classification = await self.classifications_collection.find_one({"post_id": post_id_obj})
+        classification = await self.classifications_collection.find_one({"post_id": post_id_obj})  # type: ignore
         
         if classification:
             # Convert ObjectId to string for JSON serialization
