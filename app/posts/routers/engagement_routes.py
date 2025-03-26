@@ -4,8 +4,8 @@ Replaces the SQL-dependent implementation with MongoDB.
 """
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from pydantic import BaseModel
 
+from app.posts.schemas.engagement_schemas import EngagementStats, UserInteraction
 from app.posts.services.nosql_core_post_service import NoSQLCorePostService
 from app.auth.users import current_active_user
 from app.db.models import User
@@ -14,25 +14,6 @@ router = APIRouter()
 
 # Initialize the NoSQL post service
 nosql_post_service = NoSQLCorePostService()
-
-class EngagementStats(BaseModel):
-    """Schema for engagement statistics."""
-    post_id: str
-    likes_count: int
-    views_count: int
-    reposts_count: int
-    comments_count: int
-    shares_count: int
-    engagement_score: float
-    last_updated: str
-
-class UserInteraction(BaseModel):
-    """Schema for user interaction."""
-    user_id: int
-    post_id: str
-    interaction_type: str
-    timestamp: str
-    metadata: Optional[Dict[str, Any]] = None
 
 @router.get("/posts/{post_id}/engagement", response_model=EngagementStats)
 async def get_post_engagement(

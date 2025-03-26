@@ -1,4 +1,3 @@
-from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field
 
@@ -15,13 +14,3 @@ class PostCreate(PostBase):
 class PostUpdate(BaseModel):
     content: Optional[str] = Field(None, max_length=500)
 
-class PostResponse(PostBase):
-    id: int
-    created_at: datetime
-    author_username: str
-    like_count: int = 0
-    view_count: int = 0
-    repost_count: int = 0
-
-    class Config:
-        from_attributes = True

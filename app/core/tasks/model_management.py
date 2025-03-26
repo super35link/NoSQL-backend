@@ -63,6 +63,6 @@ async def lifespan(app: FastAPI):
         print("Shutting down application...")
         # Cancel any running tasks
         for task in asyncio.all_tasks():
-            if task is not asyncio.current_task():
+            if task is not asyncio.current_task(): 
                 task.cancel()
 """

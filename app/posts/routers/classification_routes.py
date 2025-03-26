@@ -2,10 +2,10 @@
 MongoDB implementation of classification router.
 Replaces the SQL-dependent implementation with MongoDB.
 """
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from pydantic import BaseModel
 
+from app.posts.schemas.classification_schemas import ClassificationRequest, ClassificationResponse, SentimentScores, TopicItem
 from app.posts.services.nosql_core_post_service import NoSQLCorePostService
 from app.auth.users import current_active_user
 from app.db.models import User
@@ -15,29 +15,7 @@ router = APIRouter()
 # Initialize the NoSQL post service
 nosql_post_service = NoSQLCorePostService()
 
-class TopicItem(BaseModel):
-    """Schema for a topic classification item."""
-    topic: str
-    confidence: float
 
-class SentimentScores(BaseModel):
-    """Schema for sentiment analysis scores."""
-    positive: float
-    negative: float
-    neutral: float
-
-class ClassificationRequest(BaseModel):
-    """Schema for classification request."""
-    topics: List[Dict[str, Union[str, float]]]
-    sentiment: Optional[Dict[str, float]] = None
-
-class ClassificationResponse(BaseModel):
-    """Schema for classification response."""
-    post_id: str
-    topics: List[TopicItem]
-    sentiment: Optional[SentimentScores] = None
-    created_at: str
-    updated_at: Optional[str] = None
 
 @router.post("/posts/{post_id}/classify", response_model=ClassificationResponse)
 async def classify_post(

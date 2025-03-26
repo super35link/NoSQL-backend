@@ -37,6 +37,9 @@ class PostResponse(BaseModel):
     hashtags: List[str] = []
     mentioned_users: List[str] = []
     last_updated: Optional[datetime] = None
+    
+    class Config:
+        from_attributes = True
 
 class PostListResponse(BaseModel):
     """Wrapper for list of posts with pagination/metadata"""

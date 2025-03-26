@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional, Dict
+from typing import Any, List, Optional, Dict
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 class SearchFilters(BaseModel):
@@ -35,7 +35,6 @@ class SearchFilters(BaseModel):
 
 class SearchResult(BaseModel):
     model_config = ConfigDict(strict=True)
-
     post_id: int
     content: str
     author_username: str
@@ -53,3 +52,10 @@ class SearchParams(BaseModel):
     offset: int = Field(default=0, ge=0)
     filters: Optional[SearchFilters] = None
     search_type: str = Field(default="combined", pattern="^(semantic|text|combined)$")
+    
+
+class SearchResponse(BaseModel):
+    query: str
+    posts: List[Dict[str, Any]]
+    total_count: int
+    execution_time_ms: float

@@ -6,7 +6,7 @@ from app.db.mongodb import create_mongodb_indexes
 from app.db.qdrant import QdrantManager
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.api.router import api_router
+from app.router import api_router
 from fastapi.routing import APIRoute
 from typing import Set, List
  

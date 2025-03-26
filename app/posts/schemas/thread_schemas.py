@@ -1,26 +1,16 @@
 # app/posts/schemas/thread_schemas.py
 from datetime import datetime
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
+from app.posts.schemas.post_response import PostResponse
 
 class ThreadStatus(Enum):
     active = "active"
     complete = "complete"
 
-class PostResponse(BaseModel):
-    id: int
-    content: str
-    created_at: datetime
-    author_username: str
-    thread_id: Optional[int] = None
-    position_in_thread: Optional[int] = None
 
-    class Config:
-        from_attributes = True
-
-class PostCreate(BaseModel):
-    content: str = Field(..., max_length=500)
 
 class ThreadPostList(BaseModel):
     thread_id: int
@@ -38,6 +28,10 @@ class ThreadResponse(BaseModel):
     completed_at: Optional[str] = None
     creator_username: str
     first_post: PostResponse
+    root_post: Dict[str, Any]
+    replies: List[Dict[str, Any]]
+    total_replies: int
+    depth: int
 
 class ThreadStatusResponse(BaseModel):
     thread_id: int

@@ -4,8 +4,8 @@ Replaces the SQL-dependent implementation with MongoDB.
 """
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from pydantic import BaseModel
 
+from app.posts.schemas.thread_schemas import ThreadResponse
 from app.posts.services.nosql_core_post_service import NoSQLCorePostService
 from app.auth.users import current_active_user
 from app.db.models import User
@@ -14,13 +14,6 @@ router = APIRouter()
 
 # Initialize the NoSQL post service
 nosql_post_service = NoSQLCorePostService()
-
-class ThreadResponse(BaseModel):
-    """Schema for thread response."""
-    root_post: Dict[str, Any]
-    replies: List[Dict[str, Any]]
-    total_replies: int
-    depth: int
 
 @router.get("/posts/{post_id}/thread", response_model=ThreadResponse)
 async def get_post_thread(

@@ -2,10 +2,10 @@
 MongoDB implementation of search router.
 Replaces the SQL-dependent implementation with MongoDB.
 """
-from typing import List, Optional, Dict, Any
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from pydantic import BaseModel
 
+from app.posts.schemas.search_schemas import SearchResponse
 from app.posts.services.nosql_core_post_service import NoSQLCorePostService
 from app.auth.users import current_active_user
 from app.db.models import User
@@ -15,12 +15,6 @@ router = APIRouter()
 # Initialize the NoSQL post service
 nosql_post_service = NoSQLCorePostService()
 
-class SearchResponse(BaseModel):
-    """Schema for search response."""
-    query: str
-    posts: List[Dict[str, Any]]
-    total_count: int
-    execution_time_ms: float
 
 @router.get("/search", response_model=SearchResponse)
 async def search_posts(

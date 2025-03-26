@@ -2,10 +2,11 @@
 MongoDB implementation of hashtag router.
 Replaces the SQL-dependent implementation with MongoDB.
 """
-from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from pydantic import BaseModel
+from typing import List, Optional, Dict
+from fastapi import APIRouter, Depends, Query
 
+
+from app.posts.schemas.classification_schemas import HashtagPostsResponse, HashtagResponse
 from app.posts.services.nosql_core_post_service import NoSQLCorePostService
 from app.auth.users import current_active_user
 from app.db.models import User
@@ -15,17 +16,6 @@ router = APIRouter()
 # Initialize the NoSQL post service
 nosql_post_service = NoSQLCorePostService()
 
-class HashtagResponse(BaseModel):
-    """Schema for hashtag response."""
-    tag: str
-    post_count: int
-    follower_count: int
-
-class HashtagPostsResponse(BaseModel):
-    """Schema for hashtag posts response."""
-    tag: str
-    posts: List[Dict[str, Any]]
-    total_count: int
 
 @router.get("/hashtags/trending", response_model=List[HashtagResponse])
 async def get_trending_hashtags(
